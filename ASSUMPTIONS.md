@@ -28,7 +28,7 @@ Preferred: `pluginRegistry.isEnabled("omarchy.polkit")` — Omarchy ships a firs
 
 ## Privileged helper install and execution
 
-`omarchy plugin add` never runs install hooks (documented). Policy + helper install is `./scripts/install-privileged.sh`, which re-execs with **pkexec** (not sudo).
+`omarchy plugin add` never runs install hooks (documented). `./scripts/install-privileged.sh` copies files with `pkexec /usr/bin/install` (not `pkexec bash`), then runs `pkexec /usr/lib/snitch/snitch-block status` so `auth_admin_keep` caches the **path-scoped helper action**. Setup may prompt twice; later blocks should not.
 
 The polkit action annotates **only** `/usr/lib/snitch/snitch-block`. Production `pkexec` invocations always use that path. Checkout/target binaries may exist for `snitchd` monitoring; they are never used for blocking. `helperInstalled` is true only when the canonical path is executable.
 
@@ -58,7 +58,7 @@ Qt Canvas 2d `strokeStyle` is given CSS `rgba()` strings, not `QColor` / `Qt.rgb
 
 ## cgroup v2 socket match level
 
-We assume the plugin-owned path `snitch.slice/snitch-<app>` sits at **level 2** under the unified hierarchy at `/sys/fs/cgroup`. If a distro nests the slice deeper, `nft list` verification fails and the UI offers the explicit host-wide IP-set fallback instead of lying.
+The nft `level` is `cgroup_match_level(path)` (component count). For `/sys/fs/cgroup/snitch.slice/snitch-<app>` that is 2. If a distro nests the slice deeper, the computed level tracks the path we actually created. Verification still requires `nft list` to show the rule.
 
 ## nft CLI tokenization
 
@@ -78,7 +78,7 @@ This machine is macOS (`aarch64-apple-darwin` only; no linux-musl target, no zig
 
 ## Summoned panel surface
 
-`kinds` includes `panel`. The host injects `shell` (which has `.bar`) but not `anchorItem`. Summoned `Panel.qml` therefore uses `KeyboardPanel { centerOnBar: true; bar: shell.bar; anchorItem: summonAnchor }` — the same center-on-bar contract as `omarchy.clock`. The nested bar-widget loader still passes the pill as `anchorItem`.
+`kinds` includes `panel` so `shell summon|hide|toggle|call` match the Quattro IPC table. The **supported** open path is the bar pill (`anchorItem` from the widget). Standalone summon uses `KeyboardPanel.centerOnBar` and `shell.bar` when the host provides them; those properties are **not** in the Quattro IPC document, so summon placement is best-effort. If `shell.bar` is absent, use the pill.
 
 ## Plugin directory fallback
 

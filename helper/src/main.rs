@@ -61,10 +61,18 @@ fn main() {
     match result {
         Ok(v) => println!("{v}"),
         Err(e) => {
-            println!("{}", json!({"ok": false, "error": e}));
+            if e.trim_start().starts_with('{') {
+                println!("{e}");
+            } else {
+                println!("{}", json!({"ok": false, "error": e, "rollback": false}));
+            }
             std::process::exit(1);
         }
     }
+}
+
+fn fail_block(code: &str, error: String, rollback: bool) -> Result<Value, String> {
+    Err(json!({"ok": false, "error": error, "code": code, "rollback": rollback}).to_string())
 }
 
 fn fail(code: i32, msg: &str) -> ! {
@@ -107,20 +115,38 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     }
     let procs = snapshot_proc();
     let forest = forest::collect_forest(&seeds, &procs);
-    if forest.is_empty() {
-        return Err("no validated processes in the application forest".into());
+    let live: Vec<u32> = forest
+        .iter()
+        .copied()
+        .filter(|p| Path::new(&format!("/proc/{p}")).exists())
+        .collect();
+    if live.is_empty() {
+        return fail_block(
+            "empty-forest",
+            "no live processes in the application forest".into(),
+            true,
+        );
     }
 
     let mut restore_file = RestoreFile::default();
-    for pid in &forest {
-        if let Some(p) = procs.get(pid) {
-            let orig = if restore::is_root_cgroup(&p.cgroup) {
-                restore::fallback_user_slice(p.uid)
-            } else {
-                p.cgroup.clone()
-            };
-            restore_file.pids.insert(pid.to_string(), orig);
+    for pid in &live {
+        let Some(p) = procs.get(pid) else {
+            return fail_block(
+                "root-cgroup",
+                format!("pid {pid} has no recorded membership — refusing cgroup block"),
+                true,
+            );
+        };
+        if restore::is_root_cgroup(&p.cgroup) {
+            return fail_block(
+                "root-cgroup",
+                format!(
+                    "pid {pid} is in the root cgroup; cgroup-block refused (use endpoint fallback)"
+                ),
+                true,
+            );
         }
+        restore_file.pids.insert(pid.to_string(), p.cgroup.clone());
     }
     restore::save(&restore::path_for(&app), &restore_file)?;
 
@@ -130,51 +156,92 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     let _ = fs::write(slice.join("cgroup.subtree_control"), "+pids\n");
     let dest = cgroup_app(&app);
     fs::create_dir_all(&dest).map_err(|e| format!("mkdir app cgroup: {e}"))?;
+    let dest_rel = cgroup_match_path(&app);
 
     let mut moved = Vec::new();
-    for pid in &forest {
-        if write_proc(&dest, *pid).is_ok() {
-            moved.push(*pid);
+    for pid in &live {
+        if write_proc(&dest, *pid).is_err() {
+            return rollback_block(
+                &app,
+                &dest_rel,
+                format!("migrate {pid} failed"),
+                "migrate",
+            );
         }
+        let cur = read_proc_cgroup(*pid).unwrap_or_default();
+        if !restore::membership_matches(&cur, &format!("/{dest_rel}"))
+            && !restore::membership_matches(&cur, &dest_rel)
+        {
+            return rollback_block(
+                &app,
+                &dest_rel,
+                format!("pid {pid} cgroup is {cur}, expected {dest_rel}"),
+                "migrate",
+            );
+        }
+        moved.push(*pid);
     }
-    if moved.is_empty() {
-        let _ = restore_memberships(&app);
-        return Err("no processes migrated; cannot install a truthful cgroup block".into());
+    if moved.len() != live.len() {
+        return rollback_block(
+            &app,
+            &dest_rel,
+            format!("partial migration {}/{} — refusing verified:true", moved.len(), live.len()),
+            "migrate",
+        );
     }
 
-    let path = cgroup_match_path(&app);
-    if let Err(e) = add_cgroup_drop_rule(&path) {
-        let _ = restore_memberships(&app);
-        return Err(e);
+    if let Err(e) = add_cgroup_drop_rule(&dest_rel) {
+        return rollback_block(&app, &dest_rel, e, "nft");
     }
-    if !verify_cgroup_rule(&path) {
-        let _ = delete_rules_containing(&path);
-        let _ = restore_memberships(&app);
-        return Err("nft rule did not land (nft list check failed)".into());
+    if !verify_cgroup_rule(&dest_rel) {
+        return rollback_block(
+            &app,
+            &dest_rel,
+            "nft rule did not land (nft list check failed)".into(),
+            "nft",
+        );
     }
 
     let remotes = collect_remotes(&moved);
     let flush = flush_conntrack(&remotes)?;
     if !flush.ok {
-        let _ = delete_rules_containing(&path);
-        let _ = restore_memberships(&app);
-        return Err(format!(
-            "conntrack flush failed — nft rule rolled back ({})",
-            flush.summary()
-        ));
+        return rollback_block(
+            &app,
+            &dest_rel,
+            format!("conntrack flush failed ({})", flush.summary()),
+            "conntrack",
+        );
     }
 
     Ok(json!({
         "ok": true,
         "mechanism": "cgroup",
-        "path": path,
+        "path": dest_rel,
+        "level": restore::cgroup_match_level(&dest_rel),
         "moved": moved,
-        "forest": forest,
+        "forest": live,
         "flushed": flush.flushed,
         "flushFailed": flush.failed,
         "verified": true,
         "helper": CANONICAL_HELPER
     }))
+}
+
+fn rollback_block(app: &str, path: &str, why: String, code: &str) -> Result<Value, String> {
+    let _ = delete_rules_containing(path);
+    match restore_memberships(app) {
+        Ok(_) => fail_block(code, format!("{why} — rolled back"), true),
+        Err(e) => fail_block(
+            "rollback-failed",
+            format!("{why}; restore failed ({e}) — processes may still be in snitch.slice"),
+            false,
+        ),
+    }
+}
+
+fn read_proc_cgroup(pid: u32) -> Option<String> {
+    let t = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    restore::parse_unified_cgroup(&t)
 }
 
 fn snapshot_proc() -> HashMap<u32, ProcIdentity> {
@@ -290,9 +357,9 @@ fn collect_remotes(pids: &[u32]) -> Vec<IpAddr> {
         }
     }
     let mut remotes = Vec::new();
-    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+    for path in ["/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6"] {
         let Ok(text) = fs::read_to_string(path) else { continue };
-        let v6 = path.ends_with('6');
+        let v6 = path.contains("6");
         for (i, line) in text.lines().enumerate() {
             if i == 0 {
                 continue;
@@ -464,6 +531,7 @@ fn add_cgroup_drop_rule(path: &str) -> Result<(), String> {
     if verify_cgroup_rule(path) {
         return Ok(());
     }
+    let level = restore::cgroup_match_level(path).to_string();
     nft(&[
         "add",
         "rule",
@@ -473,7 +541,7 @@ fn add_cgroup_drop_rule(path: &str) -> Result<(), String> {
         "socket",
         "cgroupv2",
         "level",
-        "2",
+        &level,
         path,
         "drop",
     ])

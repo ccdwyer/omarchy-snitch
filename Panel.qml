@@ -149,8 +149,8 @@ Panel {
       selectedIndex = Math.max(0, apps.length - 1)
   }
 
-  // Summoned panels have no bar button. KeyboardPanel's documented
-  // centerOnBar path (clock) positions against shell.bar from the host.
+  // Bar click supplies anchorItem. Summon does not — centerOnBar + shell.bar
+  // is best-effort (not in the Quattro IPC table). Pill is the supported path.
   Item {
     id: summonAnchor
     width: 1

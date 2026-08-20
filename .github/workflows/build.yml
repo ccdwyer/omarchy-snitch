@@ -54,12 +54,3 @@ jobs:
         with:
           name: snitch-linux-${{ matrix.target }}
           path: dist/
-
-      - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/snitchd-${{ matrix.target }}
-            dist/snitch-block-${{ matrix.target }}
-            dist/SHA256SUMS-${{ matrix.target }}

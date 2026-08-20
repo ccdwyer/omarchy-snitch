@@ -217,7 +217,11 @@ Item {
     } else {
       lastBlockError = ev.error || (ev.warning ? String(ev.warning) : "") || "block incomplete"
       var failedVerb = blockProc.command && blockProc.command.length >= 3 ? blockProc.command[2] : ""
-      if (failedVerb === "block-app" && blockProc.command.length >= 4)
+      // Only offer host-wide IP fallback when cgroup work was fully rolled back
+      // (or never started, e.g. root-cgroup). If restore failed, processes may
+      // still sit in snitch.slice — stacking an IP-set on that is unsafe.
+      var rolled = ev.rollback === true || ev.code === "root-cgroup" || ev.code === "empty-forest"
+      if (failedVerb === "block-app" && blockProc.command.length >= 4 && rolled)
         offerIpsFallback(blockProc.command[3], ev.error)
     }
   }

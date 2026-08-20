@@ -30,7 +30,7 @@ Blocking needs the helper installed at the path the polkit policy authorizes:
 ./scripts/install-privileged.sh
 ```
 
-That script re-execs itself with **pkexec** (one `auth_admin_keep` prompt) and installs `/usr/lib/snitch/snitch-block`. Do not use `sudo` for this — pkexec is the intended authorization path.
+That script copies the helper with `pkexec /usr/bin/install` (not `pkexec bash`), then runs `pkexec /usr/lib/snitch/snitch-block status` so **the path-scoped helper action** is what `auth_admin_keep` caches. Setup may prompt twice (install, then helper). After that, blocks should be prompt-free. Do not use `sudo`.
 
 Place the pill if it did not land on the bar:
 
@@ -58,7 +58,7 @@ Hover an arc: `firefox → 142.250.x.x, US, port 443`.
 | `/` | Search apps, IPs, countries |
 | Esc | Close search, confirm dialog, or panel |
 
-The plugin declares a `panel` kind. `shell summon` opens a standalone surface centered on the bar (`KeyboardPanel` `centerOnBar`, `bar` from `shell.bar`). Clicking the pill still opens the nested bar-anchored panel. IPC:
+The supported way to open the panel is **clicking the bar pill** (or the bar-widget `open()`/`toggle()` the shell routes to that widget). The manifest also declares a `panel` kind so `shell summon|hide|toggle|call` are valid IPC verbs:
 
 ```sh
 omarchy-shell shell summon io.github.chris.snitch '{}'
@@ -66,6 +66,8 @@ omarchy-shell shell hide io.github.chris.snitch
 omarchy-shell shell toggle io.github.chris.snitch '{}'
 omarchy-shell shell call io.github.chris.snitch ping '{}'
 ```
+
+Summoned placement is best-effort (`KeyboardPanel` `centerOnBar` when the host provides `shell.bar`). That host field is not in the Quattro IPC table; if it is missing, use the pill.
 
 Service status (always-loaded singleton):
 
@@ -80,10 +82,10 @@ omarchy-shell io.github.chris.snitch status
 `block-app` creates `/sys/fs/cgroup/snitch.slice/snitch-<app>/`, migrates the app's process tree into it, installs
 
 ```
-socket cgroupv2 level 2 "snitch.slice/snitch-<app>" drop
+socket cgroupv2 level N "snitch.slice/snitch-<app>" drop
 ```
 
-on `table inet snitch`, and flushes conntrack for that app's current remotes so established flows die immediately. `verified: true` is returned only after the nft rule is listed **and** conntrack deletion succeeded (or reported zero matching flows).
+on `table inet snitch` (`N` is the path-component count, 2 for the default layout), migrates **every live PID** in the validated forest (including same-UID helpers in a private `app-*.scope`), and flushes conntrack for TCP **and** connected UDP remotes. `verified: true` is returned only when every live PID is in the snitch cgroup, the nft rule lists, **and** conntrack deletion succeeded. Processes already in the root cgroup are refused (endpoint fallback is offered). Partial migration rolls back.
 
 If cgroup migration or the match fails, the UI offers **endpoints only — affects all apps** and will not silently substitute `block-ips`. Endpoint fallback records per-app ownership; **Unblock** calls `unblock-ips` so that app's addresses leave the set (shared addresses owned by another blocked app stay). `system` and `unknown` rows cannot be blocked.
 

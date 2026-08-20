@@ -39,8 +39,8 @@ pub fn same_app(seed: &ProcIdentity, other: &ProcIdentity) -> bool {
 }
 
 /// Expand seed PIDs (typically those owning sockets) into the validated app
-/// forest: matching ancestors + descendants, plus every identity-matching
-/// member of a private app cgroup.
+/// forest: matching ancestors + descendants by identity, plus **every
+/// same-UID member** of a private app scope (helpers with other exe names).
 pub fn collect_forest(seed_pids: &[u32], procs: &HashMap<u32, ProcIdentity>) -> Vec<u32> {
     let seeds: Vec<&ProcIdentity> = seed_pids.iter().filter_map(|p| procs.get(p)).collect();
     if seeds.is_empty() {
@@ -94,7 +94,9 @@ pub fn collect_forest(seed_pids: &[u32], procs: &HashMap<u32, ProcIdentity>) -> 
         if let Some(members) = by_cg.get(cg.as_str()) {
             for pid in members {
                 if let Some(p) = procs.get(pid) {
-                    if same_app(identity, p) {
+                    // Private scope: same UID is enough. Chrome's crashpad /
+                    // nacl_helper live here with different exe names.
+                    if p.pid >= 2 && p.uid == identity.uid {
                         out.insert(*pid);
                     }
                 }
@@ -151,6 +153,23 @@ mod tests {
         ]);
         let forest = collect_forest(&[20], &procs);
         assert_eq!(forest, vec![20, 21, 22]);
+    }
+
+    #[test]
+    fn private_scope_includes_same_uid_helpers_with_other_exe() {
+        let cg = "/user.slice/user-1000.slice/user@1000.service/app-chrome-123.scope";
+        let procs = map(vec![
+            proc(20, 1, "chrome", "chrome", cg),
+            proc(21, 20, "nacl_helper", "nacl_helper", cg),
+            proc(22, 1, "chrome_crashpad", "chrome_crashpad", cg),
+            proc(99, 1, "chrome", "chrome", cg), // same uid+scope
+        ]);
+        // 99 has uid 1000 via proc() helper
+        let forest = collect_forest(&[20], &procs);
+        assert!(forest.contains(&20));
+        assert!(forest.contains(&21), "helper with other exe must be included");
+        assert!(forest.contains(&22), "crashpad with other exe must be included");
+        assert!(forest.contains(&99));
     }
 
     #[test]

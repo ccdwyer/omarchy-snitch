@@ -23,10 +23,6 @@ pub fn is_root_cgroup(path: &str) -> bool {
     p.is_empty() || p == "/"
 }
 
-pub fn fallback_user_slice(uid: u32) -> String {
-    format!("/user.slice/user-{uid}.slice")
-}
-
 pub fn sys_path(cgroup_root: &Path, rel: &str) -> PathBuf {
     let rel = rel.trim_start_matches('/');
     cgroup_root.join(rel)
@@ -49,6 +45,17 @@ pub fn save(path: &Path, file: &RestoreFile) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("write restore: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename restore: {e}"))
+}
+
+/// nft `socket cgroupv2 level N` — N is the number of path components
+/// under the cgroup root (`snitch.slice/snitch-app` → 2).
+pub fn cgroup_match_level(rel: &str) -> u32 {
+    let n = rel
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .count();
+    n.max(1) as u32
 }
 
 pub fn membership_matches(current: &str, original: &str) -> bool {
@@ -78,6 +85,13 @@ mod tests {
         assert!(is_root_cgroup(""));
         assert!(is_root_cgroup("/"));
         assert!(!is_root_cgroup("/user.slice"));
+    }
+
+    #[test]
+    fn match_level_from_path() {
+        assert_eq!(cgroup_match_level("snitch.slice/snitch-firefox"), 2);
+        assert_eq!(cgroup_match_level("/snitch.slice/snitch-firefox/"), 2);
+        assert_eq!(cgroup_match_level("a/b/c"), 3);
     }
 
     #[test]
