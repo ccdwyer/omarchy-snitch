@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import qs.Commons
 import qs.Ui
 import "ConnectionModel.js" as ConnectionModel
@@ -12,6 +11,9 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   property var snitch: null
+  property var service: null
+  property var shell: null
+  property var manifest: null
   property string pluginDir: ""
 
   property string searchQuery: ""
@@ -20,36 +22,48 @@ Panel {
   property bool confirmIps: false
 
   readonly property var barIdentity: hostWidget || root
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property var liveBar: bar || (shell && shell.bar ? shell.bar : null)
+  readonly property var liveSnitch: snitch || service || (hostWidget && hostWidget.snitch ? hostWidget.snitch : null)
+  readonly property color fg: liveBar ? liveBar.foreground : Color.foreground
   readonly property color accent: Color.accent
-  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property int modelRev: snitch ? snitch.modelRevision : 0
+  readonly property string fontFamily: liveBar ? liveBar.fontFamily : Style.font.family
+  readonly property int modelRev: liveSnitch ? liveSnitch.modelRevision : 0
   readonly property var apps: {
     var _r = modelRev
-    if (!snitch)
+    if (!liveSnitch)
       return []
-    return ConnectionModel.filterApps(snitch.model.ordered, searchQuery)
+    return ConnectionModel.filterApps(liveSnitch.model.ordered, searchQuery)
   }
   readonly property var arcs: {
     var _r = modelRev
-    return snitch && snitch.drawableArcs ? snitch.drawableArcs() : []
+    return liveSnitch && liveSnitch.drawableArcs ? liveSnitch.drawableArcs() : []
   }
-  readonly property string digest: snitch ? (snitch.digestText || "") : ""
-  readonly property string coverage: snitch ? snitch.coverage : "TCP + connected UDP"
-  readonly property bool blockingReady: snitch ? snitch.blockingReady === true : false
-  readonly property string blockHint: snitch ? (snitch.blockHint || "") : ""
+  readonly property string digest: liveSnitch ? (liveSnitch.digestText || "") : ""
+  readonly property string coverage: liveSnitch ? liveSnitch.coverage : "TCP + connected UDP"
+  readonly property bool blockingReady: liveSnitch ? liveSnitch.blockingReady === true : false
+  readonly property string blockHint: liveSnitch ? (liveSnitch.blockHint || "") : ""
   readonly property string hoverLabel: map.hoverArc ? hoverText(map.hoverArc) : ""
-  readonly property string pendingIpsApp: snitch ? (snitch.pendingIpsApp || "") : ""
-  readonly property string lastBlockError: snitch ? (snitch.lastBlockError || "") : ""
-  readonly property string daemonLine: !snitch ? "waiting for service"
-    : (snitch.daemonStatus === "fallback" ? "replay fallback — build snitchd for live capture"
-    : (snitch.daemonStatus === "missing" ? "snitchd not built — run ./build.sh"
-    : (snitch.daemonStatus === "reconnecting" ? "reconnecting to snitchd…"
-    : (snitch.daemonStatus === "connected" ? coverage : snitch.daemonStatus))))
+  readonly property string pendingIpsApp: liveSnitch ? (liveSnitch.pendingIpsApp || "") : ""
+  readonly property string lastBlockError: liveSnitch ? (liveSnitch.lastBlockError || "") : ""
+  readonly property string daemonLine: !liveSnitch ? "waiting for service"
+    : (liveSnitch.daemonStatus === "fallback" ? "replay fallback — build snitchd for live capture"
+    : (liveSnitch.daemonStatus === "missing" ? "snitchd not built — run ./build.sh"
+    : (liveSnitch.daemonStatus === "reconnecting" ? "reconnecting to snitchd…"
+    : (liveSnitch.daemonStatus === "connected" ? coverage : liveSnitch.daemonStatus))))
 
-  function open() {
-    if (snitch && snitch.markLooked)
-      snitch.markLooked()
+  onServiceChanged: {
+    if (service && !snitch)
+      snitch = service
+    if (service && service.pluginDir)
+      pluginDir = service.pluginDir
+  }
+
+  function open(payloadJson) {
+    var _p = payloadJson
+    if (service && !snitch)
+      snitch = service
+    if (liveSnitch && liveSnitch.markLooked)
+      liveSnitch.markLooked()
     selectedIndex = 0
     searchQuery = ""
     searchOpen = false
@@ -67,12 +81,16 @@ Panel {
     if (root.opened)
       root.close()
     else
-      root.open()
+      root.open("{}")
+  }
+
+  function ping() {
+    return "ok"
   }
 
   function switchPanel(direction) {
-    if (root.bar && typeof root.bar.switchPanelFrom === "function")
-      return root.bar.switchPanelFrom(root.barIdentity, direction)
+    if (root.liveBar && typeof root.liveBar.switchPanelFrom === "function")
+      return root.liveBar.switchPanelFrom(root.barIdentity, direction)
     return false
   }
 
@@ -101,19 +119,23 @@ Panel {
     appList.positionViewAtIndex(selectedIndex, ListView.Contain)
   }
 
+  function canBlockApp(a) {
+    return ConnectionModel.isBlockable(a) && blockingReady
+  }
+
   function toggleSelectedBlock() {
     var a = selectedApp()
-    if (!a || !snitch)
+    if (!canBlockApp(a) || !liveSnitch)
       return
-    if (!blockingReady)
-      return
-    snitch.requestBlock(a.id)
+    liveSnitch.requestBlock(a.id)
   }
 
   function confirmIpsBlock() {
-    if (!snitch || !pendingIpsApp)
+    if (!liveSnitch || !pendingIpsApp)
       return
-    snitch.requestBlockIps(pendingIpsApp)
+    if (!ConnectionModel.isBlockable(liveSnitch.appById ? liveSnitch.appById(pendingIpsApp) : { id: pendingIpsApp }))
+      return
+    liveSnitch.requestBlockIps(pendingIpsApp)
     confirmIps = false
   }
 
@@ -131,7 +153,7 @@ Panel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
-    bar: root.bar
+    bar: root.liveBar
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(560))
@@ -165,8 +187,8 @@ Panel {
           root.searchOpen = true
           Qt.callLater(function() { if (searchField) searchField.forceActiveFocus() })
         } else if (t === "r" || t === "R") {
-          if (root.snitch && root.snitch.markLooked)
-            root.snitch.markLooked()
+          if (root.liveSnitch && root.liveSnitch.markLooked)
+            root.liveSnitch.markLooked()
         }
       }
 
@@ -205,20 +227,20 @@ Panel {
           id: map
           width: parent.width
           height: Style.space(220)
-          pluginDir: root.pluginDir || (root.snitch ? root.snitch.pluginDir : "")
-          worldDataPath: root.snitch ? root.snitch.worldDataPath : ""
+          pluginDir: root.pluginDir || (root.liveSnitch ? root.liveSnitch.pluginDir : "")
+          worldDataPath: root.liveSnitch ? root.liveSnitch.worldDataPath : ""
           arcs: root.arcs
-          origin: root.snitch && root.snitch.origin ? root.snitch.origin : ({ lat: 48, lon: 10 })
+          origin: root.liveSnitch && root.liveSnitch.origin ? root.liveSnitch.origin : ({ lat: 48, lon: 10 })
           landColor: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.16)
           borderColor: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.28)
           oceanColor: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
           accentColor: root.accent
           extraHidden: {
             var _r = root.modelRev
-            if (!root.snitch || !root.snitch.model)
+            if (!root.liveSnitch || !root.liveSnitch.model)
               return 0
             var n = 0
-            var cons = root.snitch.model.connections || {}
+            var cons = root.liveSnitch.model.connections || {}
             for (var k in cons) {
               if (cons[k] && !cons[k].unresolved && cons[k].country)
                 n++
@@ -290,7 +312,7 @@ Panel {
         Text {
           visible: root.apps.length === 0
           width: parent.width
-          text: root.snitch && root.snitch.daemonStatus === "connected"
+          text: root.liveSnitch && root.liveSnitch.daemonStatus === "connected"
             ? "No outbound conversations right now."
             : "Waiting for connections."
           color: Qt.darker(root.fg, 1.5)
@@ -339,7 +361,7 @@ Panel {
                 height: Style.space(20)
                 fillMode: Image.PreserveAspectFit
                 asynchronous: true
-                source: root.snitch && root.snitch.appIcon ? root.snitch.appIcon(modelData) : ""
+                source: root.liveSnitch && root.liveSnitch.appIcon ? root.liveSnitch.appIcon(modelData) : ""
                 visible: status === Image.Ready
                 anchors.verticalCenter: parent.verticalCenter
               }
@@ -431,14 +453,14 @@ Panel {
 
               ToggleSwitch {
                 checked: !!modelData.blocked
-                enabled: root.blockingReady && !modelData.system
+                enabled: root.canBlockApp(modelData)
                 opacity: enabled ? 1 : 0.35
                 foreground: root.fg
                 anchors.verticalCenter: parent.verticalCenter
                 onToggled: {
                   root.selectedIndex = index
-                  if (root.snitch)
-                    root.snitch.requestBlock(modelData.id)
+                  if (root.canBlockApp(modelData) && root.liveSnitch)
+                    root.liveSnitch.requestBlock(modelData.id)
                 }
               }
             }
@@ -459,7 +481,7 @@ Panel {
           visible: root.lastBlockError !== "" && !root.confirmIps
           width: parent.width
           text: root.lastBlockError
-          color: root.bar && root.bar.urgent ? root.bar.urgent : "#e25c5c"
+          color: root.liveBar && root.liveBar.urgent ? root.liveBar.urgent : "#e25c5c"
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -506,8 +528,8 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: {
                   root.confirmIps = false
-                  if (root.snitch)
-                    root.snitch.pendingIpsApp = ""
+                  if (root.liveSnitch)
+                    root.liveSnitch.pendingIpsApp = ""
                 }
               }
               Button {

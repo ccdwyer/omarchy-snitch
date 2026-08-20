@@ -6,11 +6,13 @@ Conservative choices where the Omarchy/Quickshell contract was not 100% certain.
 
 `shell.qml` exposes `serviceFor(pluginId)` (and `firstPartyServiceFor` as an alias). Media uses `bar.shell.firstPartyServiceFor("omarchy.media")`. Snitch uses `bar.shell.serviceFor("io.github.chris.snitch")` via `SnitchAdapter.findService`, and polls until the service instance exists because `_services` is populated asynchronously after widget construction.
 
-If that injection shape changes, the adapter is the only call site.
+The summoned `panel` instance also receives `service` from the shell loader (`if ("service" in item) item.service = shell.serviceFor(...)`). `Panel.qml` treats `snitch || service` as the same singleton.
+
+If that injection shape changes, the adapter is the only call site for the bar; the panel uses the documented `service` property.
 
 ## Plugin source directory
 
-Third-party manifests are stamped with `__sourceDir` in `PluginRegistry`. Service binaries, GeoJSON, flags, and the MMDB are resolved from that path. If `__sourceDir` is absent, the daemon is treated as missing and the QML replay fallback runs.
+Third-party manifests are stamped with `__sourceDir` in `PluginRegistry`. `snitchd`, GeoJSON, flags, and the MMDB are resolved from that path. If `__sourceDir` is absent, the daemon is treated as missing and the QML replay fallback runs.
 
 ## Unix socket client
 
@@ -24,21 +26,27 @@ Third-party manifests are stamped with `__sourceDir` in `PluginRegistry`. Servic
 
 Preferred: `pluginRegistry.isEnabled("omarchy.polkit")` — Omarchy ships a first-party polkit agent service. Fallback: `pgrep` for common agent process names. We do **not** call `pkexec` as a probe (that can prompt or hang).
 
-## Privileged helper install
+## Privileged helper install and execution
 
-`omarchy plugin add` never runs install hooks (documented). Policy + helper install is a documented optional `pkexec` script, not an implicit side effect of enabling the plugin. Until it runs, block UI is greyed.
+`omarchy plugin add` never runs install hooks (documented). Policy + helper install is `./scripts/install-privileged.sh`, which re-execs with **pkexec** (not sudo).
+
+The polkit action annotates **only** `/usr/lib/snitch/snitch-block`. Production `pkexec` invocations always use that path. Checkout/target binaries may exist for `snitchd` monitoring; they are never used for blocking. `helperInstalled` is true only when the canonical path is executable.
 
 ## Desktop icons
 
-`DesktopEntries.heuristicLookup` + `Quickshell.iconPath` are wrapped in try/catch in `SnitchAdapter.iconSource`. The panel currently shows a letter avatar if lookup fails; snitchd still ships `icon` / `desktop` fields from `.desktop` Exec/StartupWMClass matching.
+`DesktopEntries.heuristicLookup` + `Quickshell.iconPath` are wrapped in try/catch in `SnitchAdapter.iconSource`. The panel currently shows a letter avatar if lookup fails; snitchd still ships `icon` / `desktop` fields from `.desktop` Exec/StartupWMClass matching. Hidden and NoDisplay entries are ignored.
 
-## IPC target name
+## IPC surface (authoritative Quattro contract)
 
-Service registers `IpcHandler { target: "io.github.chris.snitch" }`. First-party widgets use dotted ids (`omarchy.clock`). If the IPC router rejects dots, summon still works through the bar-widget `open()`/`close()`/`toggle()` contract (`isBarWidgetPanelPlugin` in `shell.qml`).
+`omarchy-shell shell summon|hide|toggle|call` apply to **panel/overlay** kinds. Snitch therefore declares `kinds: ["service", "bar-widget", "panel"]` with `entryPoints.panel: "Panel.qml"` and `keepLoaded: true`.
+
+- Bar click still Loaders `Panel.qml` nested (clock pattern) so the popup can anchor to the pill.
+- `shell summon io.github.chris.snitch` loads the panel entry point; `open(payloadJson)` / `close()` / `toggle()` / `ping()` implement the loader contract.
+- The service IpcHandler (`omarchy-shell io.github.chris.snitch status`) is a separate target for daemon health, not a substitute for `shell summon`.
 
 ## Theme tokens
 
-Panel uses `qs.Ui` / `qs.Commons` (`Style`, `Color`, `KeyboardPanel`, `WidgetButton`, `ToggleSwitch`, `Panel`, `PanelKeyCatcher`, `Button`, `TextField`) exactly as the clock and network plugins do. Colors for the map are derived from `bar.foreground` and `Color.accent` rather than hardcoded dark-only palettes.
+Panel uses `qs.Ui` / `qs.Commons` (`Style`, `Color`, `KeyboardPanel`, `WidgetButton`, `ToggleSwitch`, `Panel`, `PanelKeyCatcher`, `Button`, `TextField`) exactly as the clock and network plugins do. `QtQuick.Controls` is not imported, so `Button`/`TextField` are unambiguous.
 
 ## Canvas color values
 
@@ -66,4 +74,4 @@ No public-IP geo (that would be outbound). Origin is a timezone centroid from `$
 
 ## Linux prebuilts
 
-Spec asked for x86_64 and aarch64 prebuilts. This tree was authored on macOS, so shipping Mach-O binaries as Linux prebuilts would be a lie. `build.sh` is the supported path on the judge's Omarchy machine.
+This machine is macOS (`aarch64-apple-darwin` only; no linux-musl target or linker). Shipping Mach-O as Linux binaries would be a lie. First install is `./build.sh`. `.github/workflows/build.yml` cross-builds `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with SHA-256 checksums; artifacts attach to tagged GitHub Releases. This repo does not contain prebuilt binaries.

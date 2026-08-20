@@ -29,9 +29,10 @@ Item {
   property bool polkitAgentPresent: false
   property bool helperInstalled: false
   property bool blockingReady: polkitAgentPresent && helperInstalled && daemonAvailable
+  readonly property string canonicalHelper: "/usr/lib/snitch/snitch-block"
   property string blockHint: !polkitAgentPresent
     ? "no polkit agent — monitoring only"
-    : (!helperInstalled ? "block helper not installed — monitoring only" : "")
+    : (!helperInstalled ? "block helper not installed — run ./scripts/install-privileged.sh" : "")
   property string pluginDir: adapter.pluginDir(manifest)
   property string worldDataPath: pluginDir ? pluginDir + "/data/world-paths.json" : ""
   property string replayPath: pluginDir ? pluginDir + "/data/replay.ndjson" : ""
@@ -41,7 +42,6 @@ Item {
   property int restarts: 0
   property string snitchdPath: ""
   property string helperPath: ""
-  property string systemHelperPath: "/usr/lib/snitch/snitch-block"
 
   SnitchAdapter { id: adapter }
 
@@ -116,6 +116,8 @@ Item {
   function startFallback() {
     usingFallback = true
     daemonStatus = "fallback"
+    fallbackIndex = 0
+    fallbackTimer.stop()
     if (replayView.text && replayView.text().trim())
       fallbackTimer.restart()
     else
@@ -126,8 +128,15 @@ Item {
     var app = appById(appId)
     if (!app || !blockingReady)
       return
+    if (!ConnectionModel.isBlockable(app)) {
+      lastBlockError = "refusing to block system/unknown identity"
+      return
+    }
     if (app.blocked) {
-      runHelper(["unblock-app", appId])
+      if (app.mechanism === "endpoints")
+        runHelper(["unblock-ips", appId])
+      else
+        runHelper(["unblock-app", appId])
       return
     }
     var args = ["block-app", appId]
@@ -142,6 +151,10 @@ Item {
     var app = appById(appId)
     if (!app || !blockingReady)
       return
+    if (!ConnectionModel.isBlockable(app)) {
+      lastBlockError = "refusing to block system/unknown identity"
+      return
+    }
     var ips = ConnectionModel.remotesOf(app)
     if (ips.length === 0) {
       lastBlockError = "no endpoints to block"
@@ -160,8 +173,11 @@ Item {
   }
 
   function runHelper(args) {
-    var bin = helperPath || systemHelperPath
-    var cmd = ["pkexec", bin]
+    if (!helperInstalled) {
+      lastBlockError = "canonical helper missing at " + canonicalHelper
+      return
+    }
+    var cmd = ["pkexec", canonicalHelper]
     for (var i = 0; i < args.length; i++)
       cmd.push(args[i])
     if (blockProc.running)
@@ -178,7 +194,7 @@ Item {
       return
     }
     if (ev.ok) {
-      lastBlockError = ""
+      lastBlockError = (ev.verified === false && ev.warning) ? String(ev.warning) : ""
       if (ev.teardown) {
         model.blocked = {}
         ConnectionModel.rebuild(model, Date.now())
@@ -190,7 +206,7 @@ Item {
       if (!appId && blockProc.command && blockProc.command.length >= 4)
         appId = blockProc.command[3]
       var verb = blockProc.command && blockProc.command.length >= 3 ? blockProc.command[2] : ""
-      if (verb === "unblock-app") {
+      if (verb === "unblock-app" || verb === "unblock-ips") {
         if (blockProc.command.length >= 4)
           ConnectionModel.setBlocked(model, blockProc.command[3], "")
       } else if (verb === "block-app" || verb === "block-ips") {
@@ -210,14 +226,13 @@ Item {
     findBinProc.command = [
       "bash", "-c",
       "dir=" + shellQuote(pluginDir) + "; " +
-      "for n in snitchd snitch-block; do " +
-      "  found=''; " +
-      "  for p in \"$dir/bin/$n\" \"$dir/target/release/$n\" \"$dir/target/debug/$n\" /usr/lib/snitch/$n /usr/local/lib/snitch/$n /usr/local/bin/$n; do " +
-      "    if [ -x \"$p\" ]; then found=$p; break; fi; " +
-      "  done; " +
-      "  if [ -z \"$found\" ]; then found=$(command -v $n 2>/dev/null || true); fi; " +
-      "  printf '%s=%s\\n' \"$n\" \"$found\"; " +
-      "done"
+      "found=''; " +
+      "for p in \"$dir/bin/snitchd\" \"$dir/target/release/snitchd\" \"$dir/target/debug/snitchd\"; do " +
+      "  if [ -x \"$p\" ]; then found=$p; break; fi; " +
+      "done; " +
+      "if [ -z \"$found\" ]; then found=$(command -v snitchd 2>/dev/null || true); fi; " +
+      "printf 'snitchd=%s\\n' \"$found\"; " +
+      "if [ -x /usr/lib/snitch/snitch-block ]; then printf 'helper=/usr/lib/snitch/snitch-block\\n'; else printf 'helper=\\n'; fi"
     ]
     findBinProc.running = true
   }
@@ -236,15 +251,11 @@ Item {
       var v = pair.slice(1).join("=").trim()
       if (k === "snitchd")
         snitchdPath = v
-      if (k === "snitch-block")
+      if (k === "helper")
         helperPath = v
     }
     daemonAvailable = snitchdPath !== ""
-    helperInstalled = helperPath !== "" || false
-    if (helperPath.indexOf("/usr/lib/snitch/") === 0 || helperPath.indexOf("/usr/local/lib/snitch/") === 0)
-      helperInstalled = true
-    else if (helperPath !== "")
-      helperInstalled = true
+    helperInstalled = helperPath === canonicalHelper
     if (daemonAvailable)
       startDaemon()
     else
@@ -306,10 +317,11 @@ Item {
 
   Process {
     id: installCheck
-    command: ["bash", "-c", "test -x /usr/lib/snitch/snitch-block -o -x /usr/local/lib/snitch/snitch-block"]
+    command: ["bash", "-c", "test -x /usr/lib/snitch/snitch-block"]
     onExited: function(code) {
+      root.helperInstalled = (code === 0)
       if (code === 0)
-        root.helperInstalled = true
+        root.helperPath = root.canonicalHelper
     }
   }
 
@@ -404,8 +416,10 @@ Item {
     watchChanges: false
     printErrors: false
     onLoaded: {
-      if (root.usingFallback && !fallbackTimer.running)
+      if (root.usingFallback && !fallbackTimer.running) {
+        root.fallbackIndex = 0
         fallbackTimer.restart()
+      }
     }
   }
 
@@ -449,11 +463,5 @@ Item {
     }
 
     function ping(): string { return "ok" }
-
-    function toggle(): string {
-      if (root.shell && typeof root.shell.toggle === "function")
-        root.shell.toggle(root.pluginId, "{}")
-      return "ok"
-    }
   }
 }

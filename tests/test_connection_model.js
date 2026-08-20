@@ -120,6 +120,16 @@ testDisconnect();
 testPort53NoPulseRequirement();
 testDigest();
 testFilter();
+function testIsBlockable() {
+  assert.strictEqual(CM.isBlockable({ id: "firefox", system: false }), true);
+  assert.strictEqual(CM.isBlockable({ id: "system", system: true }), false);
+  assert.strictEqual(CM.isBlockable({ id: "system" }), false);
+  assert.strictEqual(CM.isBlockable({ id: "unknown" }), false);
+  assert.strictEqual(CM.isBlockable({ id: "Unknown", system: false }), false);
+  assert.strictEqual(CM.isBlockable(null), false);
+}
+
 testBlockBadge();
+testIsBlockable();
 testTimeWaitNotInFixtureLiveSet();
 console.log("test_connection_model.js ok");

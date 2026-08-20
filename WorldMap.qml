@@ -57,6 +57,7 @@ Item {
     radius: 6
   }
 
+  // Continents are the Shape below (Natural Earth paths). Canvas only paints arcs.
   Item {
     id: landHost
     width: 360
@@ -97,13 +98,10 @@ Item {
       var w = width
       var h = height
       ctx.clearRect(0, 0, w, h)
-      drawLand(ctx, w, h)
       drawArcs(ctx, w, h)
       drawOrigin(ctx, w, h)
     }
   }
-
-  function drawLand(ctx, w, h) { }
 
   function drawArcs(ctx, w, h) {
     var list = root.arcs || []

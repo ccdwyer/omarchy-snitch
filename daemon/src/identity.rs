@@ -176,8 +176,11 @@ pub fn parse_desktop(text: &str, path: &Path) -> Option<DesktopRecord> {
             _ => {}
         }
     }
-    if hidden || name.is_empty() {
-        let _ = no_display;
+    if hidden || no_display {
+        return None;
+    }
+    if name.is_empty() && exec.is_empty() {
+        return None;
     }
     let file_stem = path
         .file_stem()
@@ -307,6 +310,14 @@ pub fn read_status_uid(pid: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_desktop_is_ignored() {
+        let hidden = "[Desktop Entry]\nName=Secret\nExec=secret\nHidden=true\n";
+        assert!(parse_desktop(hidden, Path::new("/usr/share/applications/secret.desktop")).is_none());
+        let nodisp = "[Desktop Entry]\nName=Helper\nExec=helper\nNoDisplay=true\n";
+        assert!(parse_desktop(nodisp, Path::new("/usr/share/applications/helper.desktop")).is_none());
+    }
 
     #[test]
     fn parse_firefox_desktop() {

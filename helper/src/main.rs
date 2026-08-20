@@ -1,11 +1,11 @@
-//! Privileged helper for Snitch. Intended to be installed root-owned and
-//! invoked with `pkexec`. Verbs: block-app, unblock-app, block-ips, teardown, status.
+//! Privileged helper for Snitch. Installed root-owned at
+//! `/usr/lib/snitch/snitch-block` and invoked with `pkexec`.
 //!
-//! Blocking uses nftables `socket cgroupv2` (cgroup v2) after migrating the
-//! app's process tree into `snitch.slice/snitch-<app>`. Established flows are
-//! killed with a conntrack flush. IP-set mode is a separate, explicit verb.
+//! Verbs: block-app, unblock-app, block-ips, unblock-ips, teardown, status.
 
 use serde_json::{json, Value};
+use snitch_block::ids::sanitize_app;
+use snitch_block::owners::{self, OwnerMap};
 use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
@@ -15,11 +15,16 @@ use std::process::{Command, Stdio};
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const SLICE: &str = "snitch.slice";
 const TABLE: &str = "snitch";
+const OWNERS_PATH: &str = "/var/lib/snitch/endpoint-owners.json";
+const CANONICAL_HELPER: &str = "/usr/lib/snitch/snitch-block";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        fail(2, "usage: snitch-block <block-app|unblock-app|block-ips|teardown|status> ...");
+        fail(
+            2,
+            "usage: snitch-block <block-app|unblock-app|block-ips|unblock-ips|teardown|status> ...",
+        );
     }
     let result = match args[1].as_str() {
         "block-app" => {
@@ -40,14 +45,18 @@ fn main() {
             }
             block_ips(&args[2], &args[3..])
         }
+        "unblock-ips" => {
+            if args.len() < 3 {
+                fail(2, "unblock-ips <app-id>");
+            }
+            unblock_ips(&args[2])
+        }
         "teardown" => teardown(),
         "status" => status(),
         other => fail(2, &format!("unknown verb {other}")),
     };
     match result {
-        Ok(v) => {
-            println!("{v}");
-        }
+        Ok(v) => println!("{v}"),
         Err(e) => {
             println!("{}", json!({"ok": false, "error": e}));
             std::process::exit(1);
@@ -59,24 +68,6 @@ fn fail(code: i32, msg: &str) -> ! {
     eprintln!("{msg}");
     println!("{}", json!({"ok": false, "error": msg}));
     std::process::exit(code);
-}
-
-fn sanitize_app(id: &str) -> Result<String, String> {
-    let s: String = id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let s = s.trim_matches('-').to_string();
-    if s.is_empty() || s.len() > 64 {
-        return Err("invalid app id".into());
-    }
-    Ok(s)
 }
 
 fn parse_pid(s: &str) -> Result<u32, String> {
@@ -95,16 +86,25 @@ fn cgroup_match_path(app: &str) -> String {
     format!("{SLICE}/snitch-{app}")
 }
 
+fn owners_path() -> PathBuf {
+    PathBuf::from(OWNERS_PATH)
+}
+
 fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     let app = sanitize_app(app_raw)?;
-    let pids: Vec<u32> = pids.iter().map(|s| parse_pid(s)).collect::<Result<_, _>>()?;
+    let pids: Vec<u32> = pids
+        .iter()
+        .map(|s| parse_pid(s))
+        .collect::<Result<Vec<u32>, String>>()?
+        .into_iter()
+        .filter(|p| *p >= 2)
+        .collect();
     if !Path::new(CGROUP_ROOT).join("cgroup.controllers").is_file() {
         return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
     }
     ensure_table_and_output_chain()?;
     let slice = cgroup_slice();
     fs::create_dir_all(&slice).map_err(|e| format!("mkdir slice: {e}"))?;
-    // Best-effort: enable pids on the slice so children can be created.
     let _ = fs::write(slice.join("cgroup.subtree_control"), "+pids\n");
     let dest = cgroup_app(&app);
     fs::create_dir_all(&dest).map_err(|e| format!("mkdir app cgroup: {e}"))?;
@@ -119,27 +119,33 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     }
 
     let path = cgroup_match_path(&app);
-    // level 2: snitch.slice / snitch-<app>
     add_cgroup_drop_rule(&path)?;
     if !verify_cgroup_rule(&path) {
         return Err("nft rule did not land (nft list check failed)".into());
     }
 
     let remotes = collect_remotes(&moved);
-    let flushed = flush_conntrack(&remotes);
+    let flush = flush_conntrack(&remotes)?;
+    let nft_ok = verify_cgroup_rule(&path);
+    if !nft_ok {
+        return Err("nft rule did not land (nft list check failed)".into());
+    }
 
     Ok(json!({
         "ok": true,
         "mechanism": "cgroup",
         "path": path,
         "moved": moved,
-        "flushed": flushed,
-        "verified": true
+        "flushed": flush.flushed,
+        "flushFailed": flush.failed,
+        "verified": flush.ok,
+        "warning": if flush.ok { Value::Null } else { json!(flush.summary()) },
+        "helper": CANONICAL_HELPER
     }))
 }
 
 fn migrate_tree(pid: u32, dest: &Path, seen: &mut std::collections::HashSet<u32>, moved: &mut Vec<u32>) {
-    if !seen.insert(pid) {
+    if pid < 2 || !seen.insert(pid) {
         return;
     }
     if write_proc(dest, pid).is_ok() {
@@ -178,9 +184,6 @@ fn children_of(pid: u32) -> Vec<u32> {
 }
 
 fn collect_remotes(pids: &[u32]) -> Vec<IpAddr> {
-    // Best-effort: parse /proc/net for inodes owned by these pids.
-    // Helper is privileged so it can read other-uid sockets too, but we still
-    // only flush remotes we can see.
     let mut inodes = std::collections::HashSet::new();
     for pid in pids {
         if let Ok(fd) = fs::read_dir(format!("/proc/{pid}/fd")) {
@@ -253,22 +256,105 @@ fn parse_remote_ip(col: &str, v6: bool) -> Option<IpAddr> {
     }
 }
 
-fn flush_conntrack(remotes: &[IpAddr]) -> Vec<String> {
-    let mut flushed = Vec::new();
-    for ip in remotes {
-        let mut cmd = Command::new("conntrack");
-        match ip {
-            IpAddr::V4(_) => {
-                cmd.args(["-D", "-d", &ip.to_string()]);
-            }
-            IpAddr::V6(_) => {
-                cmd.args(["-f", "ipv6", "-D", "-d", &ip.to_string()]);
-            }
+struct FlushReport {
+    flushed: Vec<String>,
+    failed: Vec<String>,
+    ok: bool,
+    missing_tool: bool,
+}
+
+impl FlushReport {
+    fn summary(&self) -> String {
+        if self.missing_tool {
+            "conntrack not installed".into()
+        } else if self.failed.is_empty() {
+            format!("{} flushed", self.flushed.len())
+        } else {
+            format!(
+                "{} flushed, {} failed ({})",
+                self.flushed.len(),
+                self.failed.len(),
+                self.failed.join(", ")
+            )
         }
-        let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
-        flushed.push(ip.to_string());
     }
-    flushed
+}
+
+fn flush_conntrack(remotes: &[IpAddr]) -> Result<FlushReport, String> {
+    if remotes.is_empty() {
+        return Ok(FlushReport {
+            flushed: vec![],
+            failed: vec![],
+            ok: true,
+            missing_tool: false,
+        });
+    }
+    if which("conntrack").is_none() {
+        return Ok(FlushReport {
+            flushed: vec![],
+            failed: remotes.iter().map(|i| i.to_string()).collect(),
+            ok: false,
+            missing_tool: true,
+        });
+    }
+    let mut flushed = Vec::new();
+    let mut failed = Vec::new();
+    for ip in remotes {
+        match conntrack_delete(ip) {
+            Ok(()) => flushed.push(ip.to_string()),
+            Err(e) => failed.push(format!("{ip}: {e}")),
+        }
+    }
+    Ok(FlushReport {
+        ok: failed.is_empty(),
+        flushed,
+        failed,
+        missing_tool: false,
+    })
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(':') {
+        let p = Path::new(dir).join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Treat "deleted N" and "0 flow entries have been deleted" as success.
+/// Anything else (missing binary already handled, permission, bad syntax) is failure.
+fn conntrack_delete(ip: &IpAddr) -> Result<(), String> {
+    let mut cmd = Command::new("conntrack");
+    match ip {
+        IpAddr::V4(_) => {
+            cmd.args(["-D", "-d", &ip.to_string()]);
+        }
+        IpAddr::V6(_) => {
+            cmd.args(["-f", "ipv6", "-D", "-d", &ip.to_string()]);
+        }
+    }
+    let out = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("conntrack exec: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let text = format!(
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .to_lowercase();
+    if text.contains("0 flow entries") || text.contains("has been deleted") || text.contains("have been deleted")
+    {
+        return Ok(());
+    }
+    Err(text.trim().to_string())
 }
 
 fn ensure_table_and_output_chain() -> Result<(), String> {
@@ -304,26 +390,18 @@ fn add_cgroup_drop_rule(path: &str) -> Result<(), String> {
 }
 
 fn verify_cgroup_rule(path: &str) -> bool {
-    let out = Command::new("nft")
-        .args(["list", "table", "inet", TABLE])
-        .output();
-    match out {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            o.status.success() && text.contains(path) && text.contains("socket cgroupv2")
-        }
-        Err(_) => false,
-    }
+    let text = nft_list_table();
+    text.contains(path) && text.contains("socket cgroupv2")
 }
 
 fn unblock_app(app_raw: &str) -> Result<Value, String> {
     let app = sanitize_app(app_raw)?;
     let path = cgroup_match_path(&app);
-    // Recreate the chain without this path's rule: dump, delete chain, re-add others.
-    // Safer and still tiny: delete table rules matching the path via `nft -a list` + `nft delete rule handle`.
     delete_rules_containing(&path)?;
+    if verify_cgroup_rule(&path) {
+        return Err("cgroup drop rule still present after delete".into());
+    }
     let dest = cgroup_app(&app);
-    // Move leftover procs to the root cgroup so rmdir can succeed.
     if let Ok(text) = fs::read_to_string(dest.join("cgroup.procs")) {
         for tok in text.split_whitespace() {
             if let Ok(pid) = tok.parse::<u32>() {
@@ -331,12 +409,14 @@ fn unblock_app(app_raw: &str) -> Result<Value, String> {
             }
         }
     }
-    let _ = fs::remove_dir(&dest);
+    if dest.exists() {
+        fs::remove_dir(&dest).map_err(|e| format!("rmdir {}: {e}", dest.display()))?;
+    }
     Ok(json!({
         "ok": true,
         "mechanism": "cgroup",
         "path": path,
-        "verified": !verify_cgroup_rule(&path)
+        "verified": true
     }))
 }
 
@@ -350,12 +430,75 @@ fn delete_rules_containing(needle: &str) -> Result<(), String> {
         if line.contains(needle) {
             if let Some(handle) = line.rsplit("handle").nth(0).map(str::trim) {
                 if handle.chars().all(|c| c.is_ascii_digit()) {
-                    let _ = nft(&["delete", "rule", "inet", TABLE, "out", "handle", handle]);
+                    nft(&["delete", "rule", "inet", TABLE, "out", "handle", handle])?;
                 }
             }
         }
     }
     Ok(())
+}
+
+fn ensure_ip_sets_and_rules() -> Result<(), String> {
+    ensure_table_and_output_chain()?;
+    nft(&["add", "set", "inet", TABLE, "blocked4", "{ type ipv4_addr; }"])?;
+    nft(&["add", "set", "inet", TABLE, "blocked6", "{ type ipv6_addr; }"])?;
+    let listed = nft_list_table();
+    if !listed.contains("ip daddr @blocked4") {
+        nft(&["add", "rule", "inet", TABLE, "out", "ip", "daddr", "@blocked4", "drop"])?;
+    }
+    if !listed.contains("ip6 daddr @blocked6") {
+        nft(&["add", "rule", "inet", TABLE, "out", "ip6", "daddr", "@blocked6", "drop"])?;
+    }
+    let listed = nft_list_table();
+    if !listed.contains("ip daddr @blocked4") || !listed.contains("ip6 daddr @blocked6") {
+        return Err("host-wide drop rules for blocked4/blocked6 did not land".into());
+    }
+    Ok(())
+}
+
+fn set_name(ip: &IpAddr) -> &'static str {
+    match ip {
+        IpAddr::V4(_) => "blocked4",
+        IpAddr::V6(_) => "blocked6",
+    }
+}
+
+fn add_element(ip: &IpAddr) -> Result<(), String> {
+    nft(&[
+        "add",
+        "element",
+        "inet",
+        TABLE,
+        set_name(ip),
+        &format!("{{ {ip} }}"),
+    ])
+}
+
+fn delete_element(ip: &IpAddr) -> Result<(), String> {
+    nft(&[
+        "delete",
+        "element",
+        "inet",
+        TABLE,
+        set_name(ip),
+        &format!("{{ {ip} }}"),
+    ])
+}
+
+fn verify_element_present(ip: &IpAddr) -> bool {
+    nft_list_set(set_name(ip)).contains(&ip.to_string())
+}
+
+fn verify_element_absent(ip: &IpAddr) -> bool {
+    !nft_list_set(set_name(ip)).contains(&ip.to_string())
+}
+
+fn nft_list_set(name: &str) -> String {
+    Command::new("nft")
+        .args(["list", "set", "inet", TABLE, name])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 fn block_ips(app_raw: &str, ips: &[String]) -> Result<Value, String> {
@@ -364,51 +507,101 @@ fn block_ips(app_raw: &str, ips: &[String]) -> Result<Value, String> {
     for s in ips {
         parsed.push(s.parse::<IpAddr>().map_err(|_| format!("bad ip {s}"))?);
     }
-    ensure_table_and_output_chain()?;
-    nft(&["add", "set", "inet", TABLE, "blocked4", "{ type ipv4_addr; }"])?;
-    nft(&["add", "set", "inet", TABLE, "blocked6", "{ type ipv6_addr; }"])?;
-    // Idempotent rule add: skip if already present.
-    let listed = nft_list_table();
-    if !listed.contains("ip daddr @blocked4") {
-        nft(&["add", "rule", "inet", TABLE, "out", "ip", "daddr", "@blocked4", "drop"])?;
-    }
-    if !listed.contains("ip6 daddr @blocked6") {
-        nft(&["add", "rule", "inet", TABLE, "out", "ip6", "daddr", "@blocked6", "drop"])?;
-    }
+    ensure_ip_sets_and_rules()?;
     let mut added = Vec::new();
     for ip in &parsed {
-        match ip {
-            IpAddr::V4(_) => {
-                nft(&["add", "element", "inet", TABLE, "blocked4", &format!("{{ {ip} }}")])?;
-            }
-            IpAddr::V6(_) => {
-                nft(&["add", "element", "inet", TABLE, "blocked6", &format!("{{ {ip} }}")])?;
-            }
+        add_element(ip)?;
+        if !verify_element_present(ip) {
+            return Err(format!("{ip} not present in nft set after add"));
         }
         added.push(ip.to_string());
     }
-    let flushed = flush_conntrack(&parsed);
-    let verified = nft_list_table().contains("blocked4") || nft_list_table().contains("blocked6");
-    if !verified {
-        return Err("ip set did not land".into());
-    }
+    let mut map = owners::load(&owners_path());
+    owners::grant(&mut map, &app, &added);
+    owners::save(&owners_path(), &map)?;
+
+    let flush = flush_conntrack(&parsed)?;
     Ok(json!({
         "ok": true,
         "mechanism": "endpoints",
         "hostWide": true,
         "app": app,
         "ips": added,
-        "flushed": flushed,
-        "verified": true,
-        "warning": "endpoints only — affects all apps"
+        "flushed": flush.flushed,
+        "flushFailed": flush.failed,
+        "verified": flush.ok,
+        "warning": if flush.ok {
+            json!("endpoints only — affects all apps")
+        } else {
+            json!(format!("endpoints only — affects all apps; conntrack: {}", flush.summary()))
+        }
+    }))
+}
+
+fn unblock_ips(app_raw: &str) -> Result<Value, String> {
+    let app = sanitize_app(app_raw)?;
+    let mut map = owners::load(&owners_path());
+    let (released, retained) = owners::exclusive_release(&mut map, &app);
+    if released.is_empty() && retained.is_empty() && !map.contains_key(&app) {
+        owners::save(&owners_path(), &map)?;
+        return Ok(json!({
+            "ok": true,
+            "mechanism": "endpoints",
+            "app": app,
+            "released": released,
+            "retained": retained,
+            "verified": true
+        }));
+    }
+    let mut missing = Vec::new();
+    for ip_s in &released {
+        let ip: IpAddr = ip_s.parse().map_err(|_| format!("bad stored ip {ip_s}"))?;
+        delete_element(&ip)?;
+        if !verify_element_absent(&ip) {
+            missing.push(ip_s.clone());
+        }
+    }
+    owners::save(&owners_path(), &map)?;
+    if !missing.is_empty() {
+        return Err(format!(
+            "failed to remove exclusive endpoint(s) from nft set: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(json!({
+        "ok": true,
+        "mechanism": "endpoints",
+        "app": app,
+        "released": released,
+        "retained": retained,
+        "verified": true
     }))
 }
 
 fn teardown() -> Result<Value, String> {
-    let _ = Command::new("nft")
-        .args(["delete", "table", "inet", TABLE])
-        .status();
-    // Drain snitch cgroups.
+    let mut errors: Vec<String> = Vec::new();
+    let listed_before = nft_list_table();
+    if !listed_before.trim().is_empty() || Path::new("/sys/fs/cgroup").join(SLICE).exists() {
+        let nft_out = Command::new("nft")
+            .args(["delete", "table", "inet", TABLE])
+            .output();
+        match nft_out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.contains("No such file") && !err.contains("does not exist") && !listed_before.trim().is_empty()
+                {
+                    errors.push(format!("nft delete table: {err}"));
+                }
+            }
+            Err(e) => errors.push(format!("nft exec: {e}")),
+        }
+    }
+    let still = nft_list_table();
+    if still.contains(&format!("table inet {TABLE}")) || still.contains("blocked4") {
+        errors.push("table inet snitch still present after delete".into());
+    }
+
     let slice = cgroup_slice();
     if slice.is_dir() {
         if let Ok(rd) = fs::read_dir(&slice) {
@@ -421,27 +614,42 @@ fn teardown() -> Result<Value, String> {
                         }
                     }
                 }
-                let _ = fs::remove_dir(&p);
+                if let Err(e) = fs::remove_dir(&p) {
+                    errors.push(format!("rmdir {}: {e}", p.display()));
+                }
             }
         }
-        let _ = fs::remove_dir(&slice);
+        if let Err(e) = fs::remove_dir(&slice) {
+            if slice.exists() {
+                errors.push(format!("rmdir {}: {e}", slice.display()));
+            }
+        }
     }
-    Ok(json!({"ok": true, "teardown": true}))
+    if slice.exists() {
+        errors.push(format!("{} still exists", slice.display()));
+    }
+    let _ = fs::remove_file(owners_path());
+
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(json!({"ok": true, "teardown": true, "verified": true}))
 }
 
 fn status() -> Result<Value, String> {
     let listed = nft_list_table();
     let has_table = listed.contains("table inet") || listed.contains(&format!("table inet {TABLE}"));
+    let map: OwnerMap = owners::load(&owners_path());
     Ok(json!({
         "ok": true,
         "table": has_table,
-        "raw": listed
+        "owners": map,
+        "raw": listed,
+        "helper": CANONICAL_HELPER
     }))
 }
 
 fn nft(args: &[&str]) -> Result<(), String> {
-    // `nft add` of an existing object returns EEXIST (1). Treat that as success
-    // so the helper is idempotent.
     let out = Command::new("nft")
         .args(args)
         .output()
@@ -450,8 +658,14 @@ fn nft(args: &[&str]) -> Result<(), String> {
         return Ok(());
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    if err.contains("exist") || err.contains("File exists") {
-        return Ok(());
+    if err.contains("exist") || err.contains("File exists") || err.contains("No such file") {
+        // delete of missing element is success for idempotent unblock
+        if args.first().copied() == Some("delete") {
+            return Ok(());
+        }
+        if err.contains("exist") || err.contains("File exists") {
+            return Ok(());
+        }
     }
     Err(format!("nft {} failed: {err}", args.join(" ")))
 }

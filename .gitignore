@@ -7,3 +7,7 @@
 *.log
 .grok_impl.log
 .impl_prompt.md
+.fix_prompt_r1.md
+.gpt_review_r1.md
+.review_prompt.md
+.serena/

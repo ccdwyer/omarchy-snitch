@@ -227,6 +227,17 @@ function setBlocked(state, appId, mechanism) {
     return state
 }
 
+function isBlockable(app) {
+    if (!app)
+        return false
+    if (app.system === true)
+        return false
+    var id = String(app.id || "").toLowerCase()
+    if (id === "system" || id === "unknown" || id === "")
+        return false
+    return true
+}
+
 function anyBlocked(state) {
     if (!state || !state.blocked)
         return false
@@ -357,6 +368,7 @@ if (typeof module !== "undefined" && module.exports) {
         drawableArcs: drawableArcs,
         markLooked: markLooked,
         setBlocked: setBlocked,
+        isBlockable: isBlockable,
         anyBlocked: anyBlocked,
         remotesOf: remotesOf,
         rebuild: rebuild

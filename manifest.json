@@ -6,11 +6,12 @@
   "author": "chris",
   "license": "MIT",
   "description": "Live per-app outbound connection map with country flags and one-key per-app firewall blocks.",
-  "kinds": ["service", "bar-widget"],
+  "kinds": ["service", "bar-widget", "panel"],
   "keepLoaded": true,
   "entryPoints": {
     "service": "Service.qml",
-    "barWidget": "BarWidget.qml"
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml"
   },
   "barWidget": {
     "displayName": "Snitch",
