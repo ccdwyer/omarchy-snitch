@@ -5,7 +5,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 if ! command -v cargo >/dev/null 2>&1; then
-  echo "cargo is required. Install rustup: https://rustup.rs" >&2
+  echo "cargo is missing — installing the rust package…"
+  omarchy pkg add rust
+  hash -r 2>/dev/null || true
+  export PATH="/usr/bin:${HOME}/.cargo/bin:${PATH}"
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo is still missing after installing rust." >&2
   exit 1
 fi
 

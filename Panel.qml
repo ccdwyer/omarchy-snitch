@@ -42,12 +42,18 @@ Panel {
   readonly property string coverage: liveSnitch ? liveSnitch.coverage : "TCP + connected UDP"
   readonly property bool blockingReady: liveSnitch ? liveSnitch.blockingReady === true : false
   readonly property string blockHint: liveSnitch ? (liveSnitch.blockHint || "") : ""
+  readonly property bool needsHelperInstall: liveSnitch ? liveSnitch.needsHelperInstall === true : false
+  readonly property bool needsBlockingPackages: liveSnitch ? liveSnitch.needsBlockingPackages === true : false
+  readonly property bool helperInstallPending: liveSnitch ? liveSnitch.helperInstallPending === true : false
+  readonly property bool needsDaemonBuild: liveSnitch
+    ? (liveSnitch.daemonStatus === "missing" || liveSnitch.usingFallback === true)
+    : false
   readonly property string hoverLabel: map.hoverArc ? hoverText(map.hoverArc) : ""
   readonly property string pendingIpsApp: liveSnitch ? (liveSnitch.pendingIpsApp || "") : ""
   readonly property string lastBlockError: liveSnitch ? (liveSnitch.lastBlockError || "") : ""
   readonly property string daemonLine: !liveSnitch ? "waiting for service"
     : (liveSnitch.daemonStatus === "fallback" ? "replay fallback — build snitchd for live capture"
-    : (liveSnitch.daemonStatus === "missing" ? "snitchd not built — run ./build.sh"
+    : (liveSnitch.daemonStatus === "missing" ? "snitchd not built — click Build snitchd"
     : (liveSnitch.daemonStatus === "reconnecting" ? "reconnecting to snitchd…"
     : (liveSnitch.daemonStatus === "connected" ? coverage : liveSnitch.daemonStatus))))
 
@@ -199,12 +205,29 @@ Panel {
         } else if (t === "r" || t === "R") {
           if (root.liveSnitch && root.liveSnitch.markLooked)
             root.liveSnitch.markLooked()
+        } else if (t === "i" || t === "I") {
+          if (root.needsHelperInstall)
+            root.launchHelperInstall()
+          else if (root.needsDaemonBuild)
+            root.launchDaemonBuild()
+          else if (root.needsBlockingPackages)
+            root.launchPackageInstall()
         }
       }
 
+      Flickable {
+        id: panelScroll
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
+        flickableDirection: Flickable.VerticalFlick
+
       Column {
         id: column
-        width: parent.width
+        width: panelScroll.width
         spacing: Style.space(10)
 
         Item {
@@ -229,6 +252,120 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
+            }
+          }
+        }
+
+        Rectangle {
+          visible: root.needsHelperInstall
+          width: parent.width
+          height: helperCol.implicitHeight + Style.space(16)
+          radius: Style.cornerRadius
+          color: Style.hoverFillFor(root.fg, root.accent)
+          border.color: root.accent
+          border.width: 1
+
+          Column {
+            id: helperCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(10)
+            spacing: Style.space(8)
+            Text {
+              width: parent.width
+              text: "The helper is built but not installed system-wide yet. A terminal will ask for your sudo password, then the block switches turn on."
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Button {
+              text: root.helperInstallPending && root.liveSnitch && root.liveSnitch.setupWatchFor === "helper"
+                ? "Waiting…" : "Install helper"
+              enabled: !root.helperInstallPending
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              focusable: true
+              tooltipText: "Opens a terminal, builds if needed, then installs snitch-block"
+              onClicked: root.launchHelperInstall()
+            }
+          }
+        }
+
+        Rectangle {
+          visible: root.needsDaemonBuild && !root.needsHelperInstall
+          width: parent.width
+          height: buildCol.implicitHeight + Style.space(16)
+          radius: Style.cornerRadius
+          color: Style.hoverFillFor(root.fg, root.accent)
+          border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.2)
+          border.width: 1
+
+          Column {
+            id: buildCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(10)
+            spacing: Style.space(8)
+            Text {
+              width: parent.width
+              text: "snitchd is not built yet. Monitoring uses replay until you compile it."
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Button {
+              text: root.helperInstallPending && root.liveSnitch && root.liveSnitch.setupWatchFor === "daemon"
+                ? "Waiting…" : "Build snitchd"
+              enabled: !root.helperInstallPending
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              focusable: true
+              tooltipText: "Opens a terminal in the plugin directory and runs ./build.sh"
+              onClicked: root.launchDaemonBuild()
+            }
+          }
+        }
+
+        Rectangle {
+          visible: root.needsBlockingPackages
+          width: parent.width
+          height: pkgCol.implicitHeight + Style.space(16)
+          radius: Style.cornerRadius
+          color: Style.hoverFillFor(root.fg, root.accent)
+          border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.2)
+          border.width: 1
+
+          Column {
+            id: pkgCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(10)
+            spacing: Style.space(8)
+            Text {
+              width: parent.width
+              text: root.blockHint || "Blocking needs nftables and conntrack-tools. A terminal will open so you can confirm the install."
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Button {
+              text: root.helperInstallPending && root.liveSnitch && root.liveSnitch.setupWatchFor === "packages"
+                ? "Waiting…" : "Install packages"
+              enabled: !root.helperInstallPending
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              focusable: true
+              tooltipText: "Opens a terminal and runs omarchy pkg add nftables conntrack-tools"
+              onClicked: root.launchPackageInstall()
             }
           }
         }
@@ -478,7 +615,7 @@ Panel {
         }
 
         Text {
-          visible: !root.blockingReady
+          visible: !root.blockingReady && !root.needsHelperInstall && !root.needsBlockingPackages && !root.needsDaemonBuild
           width: parent.width
           text: root.blockHint || "Blocking uses nftables via polkit."
           color: Qt.darker(root.fg, 1.5)
@@ -554,12 +691,13 @@ Panel {
 
         Text {
           width: parent.width
-          text: "IP geolocation by DB-IP https://db-ip.com (CC-BY-4.0). Map: Natural Earth 110m, public domain. Arrows · b block · / search."
+          text: "IP geolocation by DB-IP https://db-ip.com (CC-BY-4.0). Map: Natural Earth 110m, public domain. Arrows · b block · i install · / search."
           color: Qt.darker(root.fg, 1.8)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
         }
+      }
       }
     }
   }
@@ -591,5 +729,26 @@ Panel {
 
   function cssAccent() {
     return "rgba(" + Math.round(root.accent.r * 255) + "," + Math.round(root.accent.g * 255) + "," + Math.round(root.accent.b * 255) + ",0.9)"
+  }
+
+  function launchHelperInstall() {
+    if (!root.liveSnitch)
+      return
+    root.liveSnitch.installPrivilegedHelper()
+    root.close()
+  }
+
+  function launchPackageInstall() {
+    if (!root.liveSnitch)
+      return
+    root.liveSnitch.installBlockingPackages()
+    root.close()
+  }
+
+  function launchDaemonBuild() {
+    if (!root.liveSnitch)
+      return
+    root.liveSnitch.buildSnitchd()
+    root.close()
   }
 }

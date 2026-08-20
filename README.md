@@ -7,7 +7,7 @@ Coverage is **TCP + connected UDP**. `/proc/net/udp` only has a remote endpoint 
 ## Install
 
 ```sh
-omarchy plugin add <git-url> --enable
+omarchy plugin add https://github.com/ccdwyer/omarchy-snitch.git --enable
 cd ~/.config/omarchy/plugins/io.github.chris.snitch
 ./build.sh
 ```
@@ -49,13 +49,18 @@ sudo pacman -S nftables conntrack-tools
 
 `snitch-block status` reports `nft`, `conntrack`, `cgroupv2`, and `blockingReady`. If any are missing, the UI greys out block controls and shows the reason plus the package names. The map keeps running.
 
-Blocking needs the helper installed at the path the polkit policy authorizes:
+Blocking needs the helper installed at the path the polkit policy authorizes. Open the Snitch panel from the bar and click **Install helper** — that opens a terminal in the plugin directory, builds `snitch-block` if needed, and runs `scripts/install-privileged.sh`. Enter your password in the polkit prompt (setup may ask twice: copy files, then authorize the helper). After that, blocks should be prompt-free.
+
+The same panel has **Build snitchd** when the daemon is missing and **Install packages** when `nftables` / `conntrack-tools` are missing.
+
+You can still run the script by hand from the plugin directory:
 
 ```sh
+cd ~/.config/omarchy/plugins/io.github.chris.snitch
 ./scripts/install-privileged.sh
 ```
 
-That script copies the helper with `pkexec /usr/bin/install` (not `pkexec bash`), then runs `pkexec /usr/lib/snitch/snitch-block status` so **the path-scoped helper action** is what `auth_admin_keep` caches. Setup may prompt twice (install, then helper). After that, blocks should be prompt-free. Do not use `sudo`.
+That script copies the helper with `pkexec /usr/bin/install` (not `pkexec bash`), then runs `pkexec /usr/lib/snitch/snitch-block status` so **the path-scoped helper action** is what `auth_admin_keep` caches. Do not use `sudo`.
 
 Place the pill if it did not land on the bar:
 
@@ -80,6 +85,7 @@ Hover an arc: `firefox → 142.250.x.x, US, port 443`.
 |-----|--------|
 | `↑` `↓` / `k` `j` | Move the app list |
 | `b` / Enter | Block or unblock the selected app |
+| `i` | Install helper, build snitchd, or install nftables (when shown) |
 | `/` | Search apps, IPs, countries |
 | Esc | Close search, confirm dialog, or panel |
 

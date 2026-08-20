@@ -28,7 +28,7 @@ Preferred: `pluginRegistry.isEnabled("omarchy.polkit")` — Omarchy ships a firs
 
 ## Privileged helper install and execution
 
-`omarchy plugin add` never runs install hooks (documented). `./scripts/install-privileged.sh` copies files with `pkexec /usr/bin/install` (not `pkexec bash`), then runs `pkexec /usr/lib/snitch/snitch-block status` so `auth_admin_keep` caches the **path-scoped helper action**. Setup may prompt twice; later blocks should not.
+`omarchy plugin add` never runs install hooks (documented). The panel **Install helper** button launches `omarchy-launch-floating-terminal-with-presentation` with `cd <pluginDir> && ./scripts/setup-from-ui.sh`. Compiling writes `bin/`, which retriggers the registry inotify watcher and restarts Omarchy's in-process polkit agent — a `pkexec` prompt open at that moment is dismissed. The privileged copy therefore uses TTY `sudo` in that terminal, then best-effort `pkexec /usr/lib/snitch/snitch-block status` for `auth_admin_keep`. The service polls `/usr/lib/snitch/snitch-block` until it appears.
 
 The polkit action annotates **only** `/usr/lib/snitch/snitch-block`. Production `pkexec` invocations always use that path. Checkout/target binaries may exist for `snitchd` monitoring; they are never used for blocking. `helperInstalled` is true only when the canonical path is executable.
 

@@ -13,10 +13,17 @@ BarWidget {
   property var snitch: null
 
   readonly property int count: snitch ? snitch.activeCount : 0
-  readonly property bool pulse: snitch ? snitch.pulse === true : false
   readonly property bool blocked: snitch ? snitch.anyBlocked === true : false
   readonly property string daemonStatus: snitch ? String(snitch.daemonStatus) : "starting"
   readonly property bool connected: daemonStatus === "connected" || daemonStatus === "fallback"
+  readonly property bool needsHelperInstall: snitch ? snitch.needsHelperInstall === true : false
+  readonly property bool pulse: {
+    if (!snitch || needsHelperInstall)
+      return false
+    if (snitch.usingFallback === true)
+      return false
+    return snitch.pulse === true
+  }
 
   readonly property string pillText: {
     if (!snitch)
@@ -31,8 +38,10 @@ BarWidget {
   readonly property string tooltip: {
     if (!snitch)
       return "Snitch — waiting for service"
+    if (needsHelperInstall)
+      return "Snitch — click to open, then Install helper"
     if (daemonStatus === "missing")
-      return "Snitch — snitchd not built (run ./build.sh)"
+      return "Snitch — snitchd not built (click to build)"
     if (daemonStatus === "reconnecting")
       return "Snitch — reconnecting"
     if (daemonStatus === "fallback")
@@ -129,7 +138,7 @@ BarWidget {
     text: root.pillText
     tooltipText: root.tooltip
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.LeftButton)
+      if (buttonCode === Qt.LeftButton || buttonCode === Qt.RightButton)
         root.toggle()
     }
 

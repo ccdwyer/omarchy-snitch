@@ -32,10 +32,15 @@ Item {
   property string blockingToolsHint: ""
   property bool blockingReady: polkitAgentPresent && helperInstalled && daemonAvailable && blockingToolsReady
   readonly property string canonicalHelper: "/usr/lib/snitch/snitch-block"
-  property string blockHint: !polkitAgentPresent
-    ? "no polkit agent — monitoring only"
-    : (!helperInstalled
-        ? "block helper not installed — run ./scripts/install-privileged.sh"
+  readonly property bool needsHelperInstall: !helperInstalled
+  readonly property bool needsBlockingPackages: helperInstalled && !blockingToolsReady
+  property bool helperInstallPending: false
+  property int helperWatchTicks: 0
+  property string setupWatchFor: ""
+  property string blockHint: !helperInstalled
+    ? "block helper not installed — click Install"
+    : (!polkitAgentPresent
+        ? "no polkit agent — monitoring only"
         : (!blockingToolsReady
             ? (blockingToolsHint || "install nftables and conntrack-tools (cgroup v2 required) — monitoring still works")
             : ""))
@@ -59,16 +64,31 @@ Item {
   function syncFromModel() {
     modelRevision = model.revision
     activeCount = model.count
-    pulse = model.pulse === true
+    pulse = model.pulse === true && !usingFallback
     digestText = model.digestText || ""
     anyBlocked = ConnectionModel.anyBlocked(model)
+  }
+
+  function rerun(proc) {
+    if (!proc)
+      return
+    proc.running = false
+    proc.running = true
+  }
+
+  function refreshInstallState() {
+    rerun(installCheck)
+    if (!helperInstalled && !daemonAvailable)
+      probeBinaries()
+    else if (helperInstalled)
+      probeHelperStatus()
   }
 
   function markLooked() {
     ConnectionModel.markLooked(model)
     if (eventSock.connected)
       writeSock(JSON.stringify({ type: "panel-open" }))
-    probeHelperStatus()
+    refreshInstallState()
     syncFromModel()
   }
 
@@ -252,6 +272,59 @@ Item {
     return "'" + String(s || "").replace(/'/g, "'\\''") + "'"
   }
 
+  function privilegedInstallCommand() {
+    var dir = pluginDir
+    if (!dir)
+      return ""
+    return "cd " + shellQuote(dir) + " && ./scripts/setup-from-ui.sh"
+  }
+
+  function launchSetupTerminal(inner) {
+    if (!inner)
+      return false
+    try {
+      Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", inner])
+      return true
+    } catch (e) {
+      lastBlockError = "could not open a terminal"
+      return false
+    }
+  }
+
+  function watchHelperInstall(kind) {
+    setupWatchFor = kind || "helper"
+    helperInstallPending = true
+    helperWatchTicks = 0
+    helperWatch.restart()
+  }
+
+  function installPrivilegedHelper() {
+    if (helperInstalled || helperInstallPending)
+      return
+    if (!launchSetupTerminal(privilegedInstallCommand()))
+      return
+    watchHelperInstall("helper")
+  }
+
+  function installBlockingPackages() {
+    if (helperInstallPending)
+      return
+    if (!launchSetupTerminal("omarchy pkg add nftables conntrack-tools"))
+      return
+    watchHelperInstall("packages")
+  }
+
+  function buildSnitchd() {
+    if (helperInstallPending)
+      return
+    var dir = pluginDir
+    if (!dir)
+      return
+    if (!launchSetupTerminal("cd " + shellQuote(dir) + " && ./build.sh"))
+      return
+    watchHelperInstall("daemon")
+  }
+
   function applyBinaryMap(text) {
     var lines = String(text || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
@@ -324,6 +397,8 @@ Item {
     if (!tz)
       tzProc.running = true
   }
+
+  onPluginRegistryChanged: probePolkit()
 
   Component.onCompleted: {
     guessOrigin()
@@ -517,10 +592,58 @@ Item {
         daemon: root.daemonStatus,
         blocking: root.blockingReady,
         coverage: root.coverage,
-        fallback: root.usingFallback
+        fallback: root.usingFallback,
+        helper: root.helperInstalled,
+        polkit: root.polkitAgentPresent,
+        needsHelper: root.needsHelperInstall
       })
     }
 
     function ping(arg: string): string { return "ok" }
+
+    function install(arg: string): string {
+      root.installPrivilegedHelper()
+      return "launched"
+    }
+
+    function refresh(arg: string): string {
+      root.refreshInstallState()
+      return JSON.stringify({ helper: root.helperInstalled, blocking: root.blockingReady })
+    }
+  }
+
+  Timer {
+    interval: 2500
+    running: !root.helperInstalled
+    repeat: true
+    onTriggered: root.refreshInstallState()
+  }
+
+  Timer {
+    id: helperWatch
+    interval: 2000
+    repeat: true
+    onTriggered: {
+      root.helperWatchTicks += 1
+      if (root.helperWatchTicks > 300) {
+        stop()
+        root.helperInstallPending = false
+        root.setupWatchFor = ""
+        return
+      }
+      root.refreshInstallState()
+      var done = false
+      if (root.setupWatchFor === "packages")
+        done = root.blockingToolsReady
+      else if (root.setupWatchFor === "daemon")
+        done = root.daemonAvailable
+      else
+        done = root.helperInstalled
+      if (done) {
+        stop()
+        root.helperInstallPending = false
+        root.setupWatchFor = ""
+      }
+    }
   }
 }
