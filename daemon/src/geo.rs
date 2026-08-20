@@ -61,9 +61,10 @@ impl GeoDb {
             return None;
         }
         let reader = self.reader.as_ref()?;
+        // maxminddb 0.25: lookup returns Result<T, MaxMindDBError>, not Option.
         let country: maxminddb::geoip2::Country = match reader.lookup(ip) {
-            Ok(Some(c)) => c,
-            Ok(None) => return None,
+            Ok(c) => c,
+            Err(maxminddb::MaxMindDBError::AddressNotFoundError(_)) => return None,
             Err(_) => return None,
         };
         let iso = country

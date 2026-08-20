@@ -66,7 +66,7 @@ The nft `level` is `cgroup_match_level(path)` (component count). For `/sys/fs/cg
 
 ## GeoIP MMDB API
 
-`maxminddb` 0.25 `Reader::lookup` returns `Result<Option<T>, _>`. DB-IP Country Lite is read as `geoip2::Country`. If a future crate release drops the `Option`, the lookup site in `daemon/src/geo.rs` is the only change.
+Pinned `maxminddb` 0.25.0: `Reader::lookup<T>(IpAddr) -> Result<T, MaxMindDBError>`. Missing addresses are `Err(AddressNotFoundError)`, not `Ok(None)`. `geo.rs` matches `Ok(country)` and maps all lookup errors to `None`.
 
 ## Origin (you-are-here)
 

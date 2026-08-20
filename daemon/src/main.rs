@@ -423,6 +423,11 @@ fn sample(live: &mut Live, server: &mut Server, rdns: bool) {
     }
     live.last_scan_cost = scan_t0.elapsed();
 
+    let current_inodes: HashSet<u64> = socks.iter().map(|s| s.inode).collect();
+    live.inode_pid.retain(|ino, pid| {
+        current_inodes.contains(ino) && pid_owns_inode(*pid, *ino)
+    });
+
     let now = now_ms();
     let mut present: HashSet<String> = HashSet::new();
     let mut udp_seen_keys: HashSet<(String, String, u16)> = HashSet::new();
@@ -551,7 +556,7 @@ fn sample(live: &mut Live, server: &mut Server, rdns: bool) {
 }
 
 fn resolve_app(live: &mut Live, inode: u64, uid: u32) -> AppIdentity {
-    let pid = live.inode_pid.get(&inode).copied().unwrap_or(0);
+    let pid = resolve_inode_pid(live, inode);
     if pid == 0 {
         if uid != live.apps.our_uid() && uid != 0 {
             return snitchd::identity::system_identity(0);
@@ -562,6 +567,43 @@ fn resolve_app(live: &mut Live, inode: u64, uid: u32) -> AppIdentity {
     let comm = read_comm(pid);
     let real_uid = read_status_uid(pid).unwrap_or(uid);
     live.apps.resolve(pid, real_uid, &exe, &comm)
+}
+
+/// Confirm the cached PID still owns this inode (inodes are reused). On
+/// miss, rescan just this inode before exposing a PID for blocking.
+fn resolve_inode_pid(live: &mut Live, inode: u64) -> u32 {
+    if let Some(&pid) = live.inode_pid.get(&inode) {
+        if pid > 0 && pid_owns_inode(pid, inode) {
+            return pid;
+        }
+        live.inode_pid.remove(&inode);
+    }
+    let want: HashSet<u64> = [inode].into_iter().collect();
+    let extra = scan_inodes(Some(&want));
+    if let Some(&pid) = extra.get(&inode) {
+        live.inode_pid.insert(inode, pid);
+        return pid;
+    }
+    0
+}
+
+fn pid_owns_inode(pid: u32, inode: u64) -> bool {
+    if pid < 2 {
+        return false;
+    }
+    let fd_dir = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    for fd in fd_dir.flatten() {
+        let Ok(target) = std::fs::read_link(fd.path()) else {
+            continue;
+        };
+        if parse_socket_link(&target.to_string_lossy()) == Some(inode) {
+            return true;
+        }
+    }
+    false
 }
 
 fn read_all_sockets() -> Vec<ParsedSocket> {
