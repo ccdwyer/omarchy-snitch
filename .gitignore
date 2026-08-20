@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.DS_Store
+/bin/snitchd
+/bin/snitch-block
+/bin/SHA256SUMS
+*.log
+.grok_impl.log
+.impl_prompt.md

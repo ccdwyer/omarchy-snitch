@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.chris.snitch",
+  "name": "Snitch",
+  "version": "1.0.0",
+  "author": "chris",
+  "license": "MIT",
+  "description": "Live per-app outbound connection map with country flags and one-key per-app firewall blocks.",
+  "kinds": ["service", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Snitch",
+    "description": "Live per-app outbound connection map",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

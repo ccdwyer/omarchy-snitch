@@ -1,0 +1,7 @@
+{
+  "networks": {
+    "142.250.190.0/24": { "first_seen": 1000, "last_seen": 5000 },
+    "8.8.8.0/24": { "first_seen": 2000, "last_seen": 4000 },
+    "2001:db8:abcd::/48": { "first_seen": 3000, "last_seen": 3000 }
+  }
+}

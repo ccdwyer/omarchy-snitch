@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Snitch</vendor>
+  <vendor_url>https://github.com/chris/snitch</vendor_url>
+  <icon_name>security-high</icon_name>
+
+  <action id="io.github.chris.snitch.block">
+    <description>Modify Snitch application firewall rules</description>
+    <description xml:lang="en">Modify Snitch application firewall rules</description>
+    <message>Authentication is required to block or unblock application network access with Snitch.</message>
+    <message xml:lang="en">Authentication is required to block or unblock application network access with Snitch.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/snitch/snitch-block</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
