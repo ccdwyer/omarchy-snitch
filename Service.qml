@@ -511,7 +511,7 @@ Item {
   IpcHandler {
     target: "io.github.chris.snitch"
 
-    function status(): string {
+    function status(arg: string): string {
       return JSON.stringify({
         count: root.activeCount,
         daemon: root.daemonStatus,
@@ -521,6 +521,6 @@ Item {
       })
     }
 
-    function ping(): string { return "ok" }
+    function ping(arg: string): string { return "ok" }
   }
 }

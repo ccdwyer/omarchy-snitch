@@ -71,20 +71,20 @@ Panel {
     root.controller.show()
   }
 
-  function close() {
+  function close(arg) {
     confirmIps = false
     searchOpen = false
     root.controller.hide()
   }
 
-  function toggle() {
+  function toggle(arg) {
     if (root.opened)
       root.close()
     else
-      root.open("{}")
+      root.open(arg && String(arg).length ? arg : "{}")
   }
 
-  function ping() {
+  function ping(arg) {
     return "ok"
   }
 

@@ -43,8 +43,8 @@ The polkit action annotates **only** `/usr/lib/snitch/snitch-block`. Production 
 `omarchy-shell shell summon|hide|toggle|call` apply to **panel/overlay** kinds. Snitch therefore declares `kinds: ["service", "bar-widget", "panel"]` with `entryPoints.panel: "Panel.qml"` and `keepLoaded: true`.
 
 - Bar click still Loaders `Panel.qml` nested (clock pattern) so the popup can anchor to the pill.
-- `shell summon io.github.chris.snitch` loads the panel entry point; `open(payloadJson)` / `close()` / `toggle()` / `ping()` implement the loader contract.
-- The service IpcHandler (`omarchy-shell io.github.chris.snitch status`) is a separate target for daemon health, not a substitute for `shell summon`.
+- `shell summon io.github.chris.snitch` loads the panel entry point; `open(payloadJson)` / `close()` / `toggle()` / `ping()` implement the loader contract (each accepts a string arg so `shell call … ping '{}'` type-checks).
+- The service IpcHandler (`omarchy-shell io.github.chris.snitch ping ''` / `status ''`) is a separate keep-loaded target for daemon health, not a substitute for `shell summon`. Every IpcHandler method takes `arg: string`.
 
 ## Theme tokens
 
