@@ -51,6 +51,8 @@ Panel {
   readonly property string hoverLabel: map.hoverArc ? hoverText(map.hoverArc) : ""
   readonly property string pendingIpsApp: liveSnitch ? (liveSnitch.pendingIpsApp || "") : ""
   readonly property string lastBlockError: liveSnitch ? (liveSnitch.lastBlockError || "") : ""
+  readonly property bool offerBinds: liveSnitch ? liveSnitch.offerBinds === true : false
+  readonly property string offerNote: liveSnitch ? (liveSnitch.offerNote || "") : ""
   readonly property string daemonLine: !liveSnitch ? "waiting for service"
     : (liveSnitch.daemonStatus === "fallback" ? "replay fallback — build snitchd for live capture"
     : (liveSnitch.daemonStatus === "missing" ? "snitchd not built — click Build snitchd"
@@ -328,6 +330,47 @@ Panel {
               focusable: true
               tooltipText: "Opens a terminal in the plugin directory and runs ./build.sh"
               onClicked: root.launchDaemonBuild()
+            }
+          }
+        }
+
+        Rectangle {
+          visible: root.offerBinds
+          width: parent.width
+          height: bindCol.implicitHeight + Style.space(16)
+          radius: Style.cornerRadius
+          color: Style.hoverFillFor(root.fg, root.accent)
+          border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.2)
+          border.width: 1
+
+          Column {
+            id: bindCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: Style.space(10)
+            spacing: Style.space(8)
+            Text {
+              width: parent.width
+              text: root.offerNote
+                ? root.offerNote
+                : "No hotkey yet. Super+Alt+S opens this panel — only if you set it."
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Button {
+              text: "Set hotkey"
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              bordered: true
+              focusable: true
+              tooltipText: "Write Super+Alt+S to ~/.config/hypr/bindings.lua (never on first load)"
+              onClicked: {
+                if (root.liveSnitch && typeof root.liveSnitch.installBinds === "function")
+                  root.liveSnitch.installBinds("")
+              }
             }
           }
         }

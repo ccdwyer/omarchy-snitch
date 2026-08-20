@@ -4,6 +4,7 @@
 //! Verbs: block-app, unblock-app, block-ips, unblock-ips, teardown, status.
 
 use serde_json::{json, Value};
+use snitch_block::caller;
 use snitch_block::deps::BlockingCaps;
 use snitch_block::forest::{self, ProcIdentity};
 use snitch_block::ids::sanitize_app;
@@ -105,23 +106,31 @@ fn owners_path() -> PathBuf {
 
 fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     let app = sanitize_app(app_raw)?;
-    let seeds: Vec<u32> = pids
+    let caller_uid = match caller::invoking_uid() {
+        Ok(u) => u,
+        Err(e) => return fail_block("pid-owner", e, false),
+    };
+    let seeds_raw: Vec<u32> = pids
         .iter()
         .map(|s| parse_pid(s))
-        .collect::<Result<Vec<u32>, String>>()?
-        .into_iter()
-        .filter(|p| *p >= 2)
-        .collect();
+        .collect::<Result<Vec<u32>, String>>()?;
     if !Path::new(CGROUP_ROOT).join("cgroup.controllers").is_file() {
         return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
     }
     let procs = snapshot_proc();
+    let seeds = match caller::authorize_seed_pids(&seeds_raw, caller_uid, &procs) {
+        Ok(s) => s,
+        Err(e) => {
+            return fail_block("pid-owner", e, false);
+        }
+    };
     let forest = forest::collect_forest(&seeds, &procs);
-    let live: Vec<u32> = forest
-        .iter()
-        .copied()
-        .filter(|p| Path::new(&format!("/proc/{p}")).exists())
-        .collect();
+    let live = match caller::authorize_seed_pids(&forest, caller_uid, &procs) {
+        Ok(s) => s,
+        Err(e) => {
+            return fail_block("pid-owner", e, false);
+        }
+    };
     if live.is_empty() {
         return fail_block(
             "empty-forest",
@@ -134,11 +143,25 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     for pid in &live {
         let Some(p) = procs.get(pid) else {
             return fail_block(
-                "root-cgroup",
+                "pid-owner",
                 format!("pid {pid} has no recorded membership — refusing cgroup block"),
-                true,
+                false,
             );
         };
+        let Some(now) = read_identity(*pid) else {
+            return fail_block(
+                "pid-owner",
+                format!("pid {pid} vanished before migrate — refusing cgroup block"),
+                false,
+            );
+        };
+        if !caller::identity_still_caller(p, &now, caller_uid) {
+            return fail_block(
+                "pid-owner",
+                format!("pid {pid} is not the invoking user's process (uid/starttime mismatch)"),
+                false,
+            );
+        }
         if restore::is_root_cgroup(&p.cgroup) {
             return fail_block(
                 "root-cgroup",
@@ -162,6 +185,30 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
 
     let mut moved = Vec::new();
     for pid in &live {
+        let Some(snap) = procs.get(pid) else {
+            return rollback_block(
+                &app,
+                &dest_rel,
+                format!("pid {pid} dropped from snapshot"),
+                "pid-owner",
+            );
+        };
+        let Some(now) = read_identity(*pid) else {
+            return rollback_block(
+                &app,
+                &dest_rel,
+                format!("pid {pid} vanished during migrate"),
+                "pid-owner",
+            );
+        };
+        if !caller::identity_still_caller(snap, &now, caller_uid) {
+            return rollback_block(
+                &app,
+                &dest_rel,
+                format!("pid {pid} uid/starttime changed — refusing migrate"),
+                "pid-owner",
+            );
+        }
         if write_proc(&dest, *pid).is_err() {
             return rollback_block(
                 &app,
@@ -253,9 +300,10 @@ fn snapshot_proc() -> HashMap<u32, ProcIdentity> {
     };
     for e in rd.flatten() {
         let pid: u32 = match e.file_name().to_str().and_then(|s| s.parse().ok()) {
-            Some(p) if p >= 2 => p,
+            Some(p) if p >= 1 => p,
             _ => continue,
         };
+        // PID 1 is snapshotted so authorize can refuse it explicitly.
         if let Some(id) = read_identity(pid) {
             map.insert(pid, id);
         }
@@ -275,6 +323,9 @@ fn read_identity(pid: u32) -> Option<ProcIdentity> {
             uid = r.split_whitespace().next()?.parse().ok()?;
         }
     }
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (flags, starttime) = caller::parse_stat_fields(&stat)?;
+    let kthread = caller::is_kernel_thread(flags);
     let exe_base = fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -294,6 +345,8 @@ fn read_identity(pid: u32) -> Option<ProcIdentity> {
         exe_base,
         comm,
         cgroup,
+        starttime,
+        kthread,
     })
 }
 

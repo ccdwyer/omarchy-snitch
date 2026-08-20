@@ -11,6 +11,9 @@ pub struct ProcIdentity {
     pub comm: String,
     /// Unified-hierarchy path relative to /sys/fs/cgroup, e.g. `/user.slice/.../app-firefox-*.scope`.
     pub cgroup: String,
+    /// `/proc/<pid>/stat` starttime — pins the PID against reuse.
+    pub starttime: u64,
+    pub kthread: bool,
 }
 
 /// systemd user app scopes are private to the launched app. Session scopes are shared.
@@ -23,7 +26,7 @@ pub fn is_private_app_cgroup(path: &str) -> bool {
 }
 
 pub fn same_app(seed: &ProcIdentity, other: &ProcIdentity) -> bool {
-    if other.pid < 2 {
+    if other.pid < 2 || other.kthread || seed.kthread {
         return false;
     }
     if seed.uid != other.uid {
@@ -43,8 +46,10 @@ pub fn same_app(seed: &ProcIdentity, other: &ProcIdentity) -> bool {
 /// same-UID member** of a private app scope (helpers with other exe names).
 pub fn collect_forest(seed_pids: &[u32], procs: &HashMap<u32, ProcIdentity>) -> Vec<u32> {
     let seeds: Vec<&ProcIdentity> = seed_pids.iter().filter_map(|p| procs.get(p)).collect();
+    // Fail closed: never pass through PIDs that were missing from the snapshot
+    // (kernel threads, gone, or unreadable). The caller must authorize seeds first.
     if seeds.is_empty() {
-        return seed_pids.iter().copied().filter(|p| *p >= 2).collect();
+        return Vec::new();
     }
 
     let mut out: BTreeSet<u32> = BTreeSet::new();
@@ -96,7 +101,7 @@ pub fn collect_forest(seed_pids: &[u32], procs: &HashMap<u32, ProcIdentity>) -> 
                 if let Some(p) = procs.get(pid) {
                     // Private scope: same UID is enough. Chrome's crashpad /
                     // nacl_helper live here with different exe names.
-                    if p.pid >= 2 && p.uid == identity.uid {
+                    if p.pid >= 2 && p.uid == identity.uid && !p.kthread {
                         out.insert(*pid);
                     }
                 }
@@ -119,6 +124,8 @@ mod tests {
             exe_base: exe.into(),
             comm: comm.into(),
             cgroup: cg.into(),
+            starttime: 1000 + u64::from(pid),
+            kthread: false,
         }
     }
 
@@ -184,6 +191,26 @@ mod tests {
         let forest = collect_forest(&[41], &procs);
         assert!(forest.contains(&40));
         assert!(forest.contains(&41));
+        assert!(!forest.contains(&50));
+    }
+
+    #[test]
+    fn missing_seed_is_not_passed_through() {
+        let procs = map(vec![proc(10, 1, "firefox", "firefox", "/user.slice")]);
+        assert!(collect_forest(&[99], &procs).is_empty());
+        assert!(collect_forest(&[1], &procs).is_empty());
+    }
+
+    #[test]
+    fn foreign_uid_is_not_in_forest() {
+        let mut other = proc(50, 1, "firefox", "firefox", "/user.slice");
+        other.uid = 0;
+        let procs = map(vec![
+            proc(10, 1, "firefox", "firefox", "/user.slice"),
+            other,
+        ]);
+        let forest = collect_forest(&[10], &procs);
+        assert!(forest.contains(&10));
         assert!(!forest.contains(&50));
     }
 }

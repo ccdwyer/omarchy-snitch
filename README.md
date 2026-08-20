@@ -70,7 +70,7 @@ omarchy bar move io.github.chris.snitch --section right
 
 ## Usage
 
-Click the bar pill (live connection count) to open the panel.
+Click the bar pill (live connection count) to open the panel. If no hotkey is set, the bar and panel offer **Set hotkey** (suggested Super+Alt+S). That bind is written to `~/.config/hypr/bindings.lua` only when you click it — never on first load.
 
 - **Quiet pill** — count of live conversations
 - **Amber pulse** — a network prefix never seen before (/24 v4, /48 v6)
@@ -89,7 +89,7 @@ Hover an arc: `firefox → 142.250.x.x, US, port 443`.
 | `/` | Search apps, IPs, countries |
 | Esc | Close search, confirm dialog, or panel |
 
-The supported way to open the panel is **clicking the bar pill** (or the bar-widget `open()`/`toggle()` the shell routes to that widget). The manifest also declares a `panel` kind so `shell summon|hide|toggle|call` are valid IPC verbs:
+The supported way to open the panel is **clicking the bar pill** (or the bar-widget `open()`/`toggle()` the shell routes to that widget). Opt-in Super+Alt+S (or Super+Shift+Alt+S if that combo is taken) runs the same toggle. The manifest also declares a `panel` kind so `shell summon|hide|toggle|call` are valid IPC verbs:
 
 ```sh
 omarchy-shell shell summon io.github.chris.snitch '{}'
@@ -110,6 +110,8 @@ Summoned placement is best-effort (`KeyboardPanel` `centerOnBar` when the host p
 ## Blocking
 
 **Blocking uses nftables via polkit.** Monitoring does not. Production blocks always run `pkexec /usr/lib/snitch/snitch-block` — checkout copies are never authorized.
+
+Every PID passed to `block-app` is checked against the **invoking user** (`PKEXEC_UID`, then `SUDO_UID` — never the helper's root euid). The process must exist, its UID must match that user, and starttime must still identify the same PID. PIDs owned by other users, PID 1, kernel threads, and missing PIDs are refused; the helper does not migrate or firewall them.
 
 `block-app` creates `/sys/fs/cgroup/snitch.slice/snitch-<app>/`, migrates the app's process tree into it, installs
 
@@ -163,4 +165,6 @@ QML hot-reloads from `~/.config/omarchy/plugins/io.github.chris.snitch/`.
 omarchy plugin remove io.github.chris.snitch
 pkexec /usr/lib/snitch/snitch-block teardown
 pkexec rm -f /usr/lib/snitch/snitch-block /usr/share/polkit-1/actions/io.github.chris.snitch.policy
+# If you opted in to Super+Alt+S, remove the marked bind block:
+sed -i '/-- BEGIN io.github.chris.snitch/,/-- END io.github.chris.snitch/d' ~/.config/hypr/bindings.lua
 ```

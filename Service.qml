@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import "ConnectionModel.js" as ConnectionModel
 import "Geo.js" as Geo
+import "js/Binds.js" as Binds
 
 Item {
   id: root
@@ -53,6 +54,10 @@ Item {
   property int restarts: 0
   property string snitchdPath: ""
   property string helperPath: ""
+  property bool offerBinds: true
+  property string offerNote: "Set Super+Alt+S to open Snitch"
+  property var workQueue: []
+  property var workCurrent: null
 
   SnitchAdapter { id: adapter }
 
@@ -314,6 +319,76 @@ Item {
     watchHelperInstall("packages")
   }
 
+  function applyBindPlan(plan) {
+    var p = plan || Binds.offer
+    root.offerBinds = !!p.needed
+    root.offerNote = String(p.note || "")
+    Binds.setOffer(p)
+  }
+
+  function enqueueWork(command, done) {
+    workQueue.push({ command: command, done: done || null })
+    runWork()
+  }
+
+  function runWork() {
+    if (bindWorkProc.running || root.workCurrent)
+      return
+    if (!workQueue.length)
+      return
+    root.workCurrent = workQueue.shift()
+    bindWorkProc.command = root.workCurrent.command
+    bindWorkProc.running = true
+  }
+
+  function scanBinds() {
+    enqueueWork(["hyprctl", "-j", "binds"], function(text, code) {
+      if (Number(code) !== 0) {
+        root.offerBinds = true
+        if (!root.offerNote)
+          root.offerNote = "Set Super+Alt+S to open Snitch"
+        return
+      }
+      root.applyBindPlan(Binds.applyScan(text))
+    })
+  }
+
+  function notifyNewBinds(plan) {
+    var body = Binds.notifyBody(plan.toAdd, plan.skipped)
+    if (!body)
+      return
+    Quickshell.execDetached(Binds.notifyArgv("Snitch", "Snitch keybinding", body))
+  }
+
+  // Only called from an explicit Set hotkey click (or installBinds IPC).
+  // Never from Component.onCompleted / scanBinds.
+  function installBinds(arg) {
+    var _a = arg
+    enqueueWork(["hyprctl", "-j", "binds"], function(text, code) {
+      if (Number(code) !== 0) {
+        root.offerNote = "could not read keybinds"
+        root.offerBinds = true
+        return
+      }
+      var plan = Binds.applyScan(text)
+      if (!plan.toAdd || !plan.toAdd.length) {
+        root.applyBindPlan(plan)
+        return
+      }
+      var lua = Binds.luaBlock(plan.toAdd)
+      enqueueWork(["python3", root.pluginDir + "/compat/install-binds.py", root.pluginId, lua], function(out, instCode) {
+        if (Number(instCode) !== 0) {
+          root.offerNote = "could not write ~/.config/hypr/bindings.lua"
+          root.offerBinds = true
+          return
+        }
+        root.notifyNewBinds(plan)
+        Qt.callLater(root.scanBinds)
+      })
+    })
+    return "ok"
+  }
+
   function buildSnitchd() {
     if (helperInstallPending)
       return
@@ -405,6 +480,7 @@ Item {
     probeBinaries()
     probePolkit()
     installCheck.running = true
+    Qt.callLater(root.scanBinds)
   }
 
   Process {
@@ -583,6 +659,35 @@ Item {
     onTriggered: root.clearPulse()
   }
 
+  Process {
+    id: bindWorkProc
+    running: false
+    stdout: StdioCollector {
+      id: bindWorkOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var text = bindWorkOut.text
+      var job = root.workCurrent
+      root.workCurrent = null
+      if (job && job.done) {
+        try {
+          job.done(text, exitCode)
+        } catch (e) {
+          console.warn("snitch: bind work callback failed", e)
+        }
+      }
+      root.runWork()
+    }
+  }
+
+  Timer {
+    interval: 4000
+    repeat: true
+    running: true
+    onTriggered: root.scanBinds()
+  }
+
   IpcHandler {
     target: "io.github.chris.snitch"
 
@@ -595,11 +700,15 @@ Item {
         fallback: root.usingFallback,
         helper: root.helperInstalled,
         polkit: root.polkitAgentPresent,
-        needsHelper: root.needsHelperInstall
+        needsHelper: root.needsHelperInstall,
+        bindOfferNeeded: root.offerBinds,
+        bindOfferNote: root.offerNote
       })
     }
 
     function ping(arg: string): string { return "ok" }
+
+    function installBinds(arg: string): string { return root.installBinds(arg) }
 
     function install(arg: string): string {
       root.installPrivilegedHelper()

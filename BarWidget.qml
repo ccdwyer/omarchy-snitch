@@ -17,6 +17,8 @@ BarWidget {
   readonly property string daemonStatus: snitch ? String(snitch.daemonStatus) : "starting"
   readonly property bool connected: daemonStatus === "connected" || daemonStatus === "fallback"
   readonly property bool needsHelperInstall: snitch ? snitch.needsHelperInstall === true : false
+  readonly property bool offerBinds: snitch ? snitch.offerBinds === true : false
+  readonly property string offerNote: snitch ? String(snitch.offerNote || "") : ""
   readonly property bool pulse: {
     if (!snitch || needsHelperInstall)
       return false
@@ -50,7 +52,14 @@ BarWidget {
       return "Snitch — " + count + " connections, block active"
     if (pulse)
       return "Snitch — new network " + (snitch.model && snitch.model.pulseNetwork ? snitch.model.pulseNetwork : "")
+    if (offerBinds)
+      return "Snitch — " + count + " live connections. Set hotkey (Super+Alt+S) to open the panel."
     return "Snitch — " + count + " live connections (TCP + connected UDP)"
+  }
+
+  function installBinds() {
+    if (snitch && typeof snitch.installBinds === "function")
+      snitch.installBinds("")
   }
 
   function refreshService() {
@@ -96,8 +105,8 @@ BarWidget {
       target.pluginDir = root.snitch && root.snitch.pluginDir ? root.snitch.pluginDir : ""
   }
 
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  implicitWidth: row.implicitWidth
+  implicitHeight: row.implicitHeight
 
   onBarChanged: {
     refreshService()
@@ -131,9 +140,12 @@ BarWidget {
     }
   }
 
+  Row {
+    id: row
+    spacing: Style.space(4)
+
   WidgetButton {
     id: button
-    anchors.fill: parent
     bar: root.bar
     text: root.pillText
     tooltipText: root.tooltip
@@ -164,5 +176,20 @@ BarWidget {
       NumberAnimation { target: pulseHalo; property: "pulseOpacity"; from: 0.15; to: 1; duration: 280 }
       onStopped: pulseHalo.pulseOpacity = root.pulse ? 1 : (root.blocked ? 0.9 : 0)
     }
+  }
+
+  WidgetButton {
+    id: bindButton
+    visible: root.offerBinds
+    bar: root.bar
+    text: "Set hotkey"
+    tooltipText: root.offerNote
+      ? root.offerNote
+      : "Set Super+Alt+S to open Snitch (not assigned automatically)"
+    onPressed: function(buttonCode) {
+      if (buttonCode === Qt.LeftButton)
+        root.installBinds()
+    }
+  }
   }
 }
