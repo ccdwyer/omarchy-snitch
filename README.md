@@ -92,13 +92,14 @@ omarchy-shell shell toggle io.github.chris.snitch '{}'
 omarchy-shell shell call io.github.chris.snitch ping '{}'
 ```
 
-Summoned placement is best-effort (`KeyboardPanel` `centerOnBar` when the host provides `shell.bar`). That host field is not in the Quattro IPC table; if it is missing, use the pill.
-
-Service status (always-loaded singleton):
+`shell call … ping` works when the panel is loaded (`keepLoaded`). The reliable service path is the keep-loaded IpcHandler (always pass the string argument):
 
 ```sh
-omarchy-shell io.github.chris.snitch status
+omarchy-shell io.github.chris.snitch ping ''
+omarchy-shell io.github.chris.snitch status ''
 ```
+
+Summoned placement is best-effort (`KeyboardPanel` `centerOnBar` when the host provides `shell.bar`). That host field is not in the Quattro IPC table; if it is missing, use the pill.
 
 ## Blocking
 
