@@ -177,6 +177,24 @@ struct Server {
 
 struct Client {
     stream: UnixStream,
+    buf: Vec<u8>,
+}
+
+const MAX_CMD_BUF: usize = 64 * 1024;
+
+/// Drain complete NDJSON lines (ending in `\n`) from `buf`. The remainder
+/// stays so a split frame is not parsed or dropped.
+fn take_complete_lines(buf: &mut Vec<u8>) -> Vec<String> {
+    let mut cmds = Vec::new();
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let line: Vec<u8> = buf.drain(..=pos).collect();
+        let s = String::from_utf8_lossy(&line);
+        let s = s.trim();
+        if !s.is_empty() {
+            cmds.push(s.to_string());
+        }
+    }
+    cmds
 }
 
 impl Server {
@@ -206,7 +224,10 @@ impl Server {
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     let _ = stream.set_nonblocking(true);
-                    let mut c = Client { stream };
+                    let mut c = Client {
+                        stream,
+                        buf: Vec::new(),
+                    };
                     let hello = Event::Hello {
                         version: VERSION.into(),
                         pid: std::process::id(),
@@ -237,16 +258,21 @@ impl Server {
     fn drain_commands(&mut self) -> Vec<String> {
         let mut cmds = Vec::new();
         for c in &mut self.clients {
-            let mut buf = [0u8; 512];
-            match c.stream.read(&mut buf) {
-                Ok(0) => {}
-                Ok(n) => {
-                    for line in String::from_utf8_lossy(&buf[..n]).lines() {
-                        cmds.push(line.trim().to_string());
+            let mut tmp = [0u8; 4096];
+            loop {
+                match c.stream.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        c.buf.extend_from_slice(&tmp[..n]);
+                        cmds.extend(take_complete_lines(&mut c.buf));
+                        if c.buf.len() > MAX_CMD_BUF {
+                            c.buf.clear();
+                            break;
+                        }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => {}
             }
         }
         cmds
@@ -704,5 +730,30 @@ mod tests {
     fn socket_link_parse() {
         assert_eq!(parse_socket_link("socket:[54321]"), Some(54321));
         assert_eq!(parse_socket_link("/dev/pts/0"), None);
+    }
+
+    #[test]
+    fn ndjson_split_frame_is_held() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(br#"{ "type": "pan"#);
+        assert!(take_complete_lines(&mut buf).is_empty());
+        buf.extend_from_slice(br#"el-open" }"#);
+        buf.push(b'\n');
+        assert_eq!(
+            take_complete_lines(&mut buf),
+            vec![r#"{ "type": "panel-open" }"#]
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn ndjson_two_lines_one_read() {
+        let mut buf = b"{\"type\":\"ping\"}\n{\"type\":\"panel-open\"}\npartial".to_vec();
+        let lines = take_complete_lines(&mut buf);
+        assert_eq!(
+            lines,
+            vec![r#"{"type":"ping"}"#, r#"{"type":"panel-open"}"#]
+        );
+        assert_eq!(buf, b"partial");
     }
 }

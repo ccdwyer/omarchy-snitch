@@ -4,8 +4,10 @@
 //! Verbs: block-app, unblock-app, block-ips, unblock-ips, teardown, status.
 
 use serde_json::{json, Value};
+use snitch_block::deps::BlockingCaps;
 use snitch_block::forest::{self, ProcIdentity};
 use snitch_block::ids::sanitize_app;
+use snitch_block::nft_verify;
 use snitch_block::owners::{self, OwnerMap};
 use snitch_block::restore::{self, RestoreFile};
 use std::collections::HashMap;
@@ -471,14 +473,56 @@ fn flush_conntrack(remotes: &[IpAddr]) -> Result<FlushReport, String> {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var("PATH").unwrap_or_default();
-    for dir in path.split(':') {
-        let p = Path::new(dir).join(name);
-        if p.is_file() {
+    let mut dirs: Vec<String> = Vec::new();
+    if let Ok(path) = std::env::var("PATH") {
+        dirs.extend(
+            path.split(':')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+        );
+    }
+    for extra in ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] {
+        if !dirs.iter().any(|d| d == extra) {
+            dirs.push(extra.to_string());
+        }
+    }
+    for dir in dirs {
+        let p = Path::new(&dir).join(name);
+        if is_executable(&p) {
             return Some(p);
         }
     }
     None
+}
+
+fn is_executable(p: &Path) -> bool {
+    if !p.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(p)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn cgroup_v2_present() -> bool {
+    Path::new("/sys/fs/cgroup/cgroup.controllers").is_file()
+        || Path::new("/sys/fs/cgroup/unified/cgroup.controllers").is_file()
+}
+
+fn probe_blocking_caps() -> BlockingCaps {
+    BlockingCaps::from_presence(
+        which("nft").is_some(),
+        which("conntrack").is_some(),
+        cgroup_v2_present(),
+    )
 }
 
 /// Treat "deleted N" and "0 flow entries have been deleted" as success.
@@ -548,8 +592,13 @@ fn add_cgroup_drop_rule(path: &str) -> Result<(), String> {
 }
 
 fn verify_cgroup_rule(path: &str) -> bool {
-    let text = nft_list_table();
-    text.contains(path) && text.contains("socket cgroupv2")
+    let level = restore::cgroup_match_level(path);
+    if let Some(js) = nft_list_table_json() {
+        if nft_verify::cgroup_drop_in_json(&js, path, level) {
+            return true;
+        }
+    }
+    nft_verify::cgroup_drop_in_text(&nft_list_table(), path, level)
 }
 
 fn unblock_app(app_raw: &str) -> Result<Value, String> {
@@ -823,12 +872,20 @@ fn status() -> Result<Value, String> {
     let listed = nft_list_table();
     let has_table = listed.contains("table inet") || listed.contains(&format!("table inet {TABLE}"));
     let map: OwnerMap = owners::load(&owners_path());
+    let caps = probe_blocking_caps();
     Ok(json!({
         "ok": true,
         "table": has_table,
         "owners": map,
         "raw": listed,
-        "helper": CANONICAL_HELPER
+        "helper": CANONICAL_HELPER,
+        "nft": caps.nft,
+        "conntrack": caps.conntrack,
+        "cgroupv2": caps.cgroupv2,
+        "blockingReady": caps.ready(),
+        "missing": caps.missing(),
+        "packages": caps.packages(),
+        "hint": caps.hint()
     }))
 }
 
@@ -859,4 +916,19 @@ fn nft_list_table() -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
+}
+
+fn nft_list_table_json() -> Option<String> {
+    let out = Command::new("nft")
+        .args(["-j", "list", "table", "inet", TABLE])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    if s.trim().is_empty() {
+        return None;
+    }
+    Some(s)
 }

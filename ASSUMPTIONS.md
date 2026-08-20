@@ -16,7 +16,7 @@ Third-party manifests are stamped with `__sourceDir` in `PluginRegistry`. `snitc
 
 ## Unix socket client
 
-`Quickshell.Io.Socket` is a client (`path` + `connected`) extending `DataStream`, so it takes a `SplitParser`. The daemon is a `UnixListener` at `$XDG_RUNTIME_DIR/snitch.sock`. This matches the documented Socket API; we do not use `SocketServer` from QML.
+`Quickshell.Io.Socket` is a client (`path` + `connected`) extending `DataStream`, so it takes a `SplitParser`. The daemon is a `UnixListener` at `$XDG_RUNTIME_DIR/snitch.sock`. This matches the documented Socket API; we do not use `SocketServer` from QML. Inbound commands are accumulated in a per-client buffer and split on `\n` so a split `panel-open` frame is not parsed or dropped.
 
 ## Process supervision
 
@@ -31,6 +31,8 @@ Preferred: `pluginRegistry.isEnabled("omarchy.polkit")` — Omarchy ships a firs
 `omarchy plugin add` never runs install hooks (documented). `./scripts/install-privileged.sh` copies files with `pkexec /usr/bin/install` (not `pkexec bash`), then runs `pkexec /usr/lib/snitch/snitch-block status` so `auth_admin_keep` caches the **path-scoped helper action**. Setup may prompt twice; later blocks should not.
 
 The polkit action annotates **only** `/usr/lib/snitch/snitch-block`. Production `pkexec` invocations always use that path. Checkout/target binaries may exist for `snitchd` monitoring; they are never used for blocking. `helperInstalled` is true only when the canonical path is executable.
+
+`snitch-block status` (run **without** `pkexec`, so the probe cannot prompt) reports whether `nft`, `conntrack`, and cgroup v2 (`/sys/fs/cgroup/cgroup.controllers`) are present. `blockingReady` in QML is `polkitAgentPresent && helperInstalled && daemonAvailable && status.blockingReady`. Missing tools grey out block controls and set `blockHint` to the helper’s `hint` (package names). Monitoring does not consult those tools.
 
 ## Desktop icons
 
@@ -58,7 +60,7 @@ Qt Canvas 2d `strokeStyle` is given CSS `rgba()` strings, not `QColor` / `Qt.rgb
 
 ## cgroup v2 socket match level
 
-The nft `level` is `cgroup_match_level(path)` (component count). For `/sys/fs/cgroup/snitch.slice/snitch-<app>` that is 2. If a distro nests the slice deeper, the computed level tracks the path we actually created. Verification still requires `nft list` to show the rule.
+The nft `level` is `cgroup_match_level(path)` (component count). For `/sys/fs/cgroup/snitch.slice/snitch-<app>` that is 2. If a distro nests the slice deeper, the computed level tracks the path we actually created. Verification prefers `nft -j list table inet snitch` and requires the **same rule** to carry the path, `socket`/`cgroupv2`, the expected level, and a `drop` verdict. Text `nft list` is the fallback and matches that complete line, not a table-wide substring.
 
 ## nft CLI tokenization
 

@@ -28,11 +28,17 @@ Item {
   property bool usingFallback: false
   property bool polkitAgentPresent: false
   property bool helperInstalled: false
-  property bool blockingReady: polkitAgentPresent && helperInstalled && daemonAvailable
+  property bool blockingToolsReady: false
+  property string blockingToolsHint: ""
+  property bool blockingReady: polkitAgentPresent && helperInstalled && daemonAvailable && blockingToolsReady
   readonly property string canonicalHelper: "/usr/lib/snitch/snitch-block"
   property string blockHint: !polkitAgentPresent
     ? "no polkit agent — monitoring only"
-    : (!helperInstalled ? "block helper not installed — run ./scripts/install-privileged.sh" : "")
+    : (!helperInstalled
+        ? "block helper not installed — run ./scripts/install-privileged.sh"
+        : (!blockingToolsReady
+            ? (blockingToolsHint || "install nftables and conntrack-tools (cgroup v2 required) — monitoring still works")
+            : ""))
   property string pluginDir: adapter.pluginDir(manifest)
   property string worldDataPath: pluginDir ? pluginDir + "/data/world-paths.json" : ""
   property string replayPath: pluginDir ? pluginDir + "/data/replay.ndjson" : ""
@@ -62,6 +68,7 @@ Item {
     ConnectionModel.markLooked(model)
     if (eventSock.connected)
       writeSock(JSON.stringify({ type: "panel-open" }))
+    probeHelperStatus()
     syncFromModel()
   }
 
@@ -260,10 +267,42 @@ Item {
     }
     daemonAvailable = snitchdPath !== ""
     helperInstalled = helperPath === canonicalHelper
+    if (!helperInstalled)
+      blockingToolsReady = false
+    else
+      probeHelperStatus()
     if (daemonAvailable)
       startDaemon()
     else
       startFallback()
+  }
+
+  function probeHelperStatus() {
+    if (!helperInstalled)
+      return
+    if (helperStatusProc.running)
+      return
+    helperStatusProc.command = [canonicalHelper, "status"]
+    helperStatusProc.running = true
+  }
+
+  function applyHelperStatus(text) {
+    var raw = String(text || "").trim()
+    var ev
+    try { ev = JSON.parse(raw) } catch (e) {
+      blockingToolsReady = false
+      blockingToolsHint = "helper status unreadable — install nftables and conntrack-tools (cgroup v2 required). Monitoring still works."
+      return
+    }
+    blockingToolsReady = ev.blockingReady === true
+    blockingToolsHint = ev.hint ? String(ev.hint) : ""
+    if (!blockingToolsReady && !blockingToolsHint) {
+      var pkgs = ev.packages
+      if (pkgs && pkgs.length)
+        blockingToolsHint = "install " + pkgs.join(", ") + " — blocking requires nftables, conntrack-tools, and cgroup v2"
+      else
+        blockingToolsHint = "blocking unavailable — need nftables, conntrack-tools, and cgroup v2. Monitoring still works."
+    }
   }
 
   function probePolkit() {
@@ -320,12 +359,28 @@ Item {
   }
 
   Process {
+    id: helperStatusProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyHelperStatus(text)
+    }
+    onExited: function(code) {
+      if (code !== 0 && !root.blockingToolsReady)
+        root.blockingToolsHint = root.blockingToolsHint || "helper status failed — install nftables and conntrack-tools (cgroup v2 required)"
+    }
+  }
+
+  Process {
     id: installCheck
     command: ["bash", "-c", "test -x /usr/lib/snitch/snitch-block"]
     onExited: function(code) {
       root.helperInstalled = (code === 0)
-      if (code === 0)
+      if (code === 0) {
         root.helperPath = root.canonicalHelper
+        root.probeHelperStatus()
+      } else {
+        root.blockingToolsReady = false
+      }
     }
   }
 

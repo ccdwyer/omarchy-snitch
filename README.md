@@ -12,17 +12,42 @@ cd ~/.config/omarchy/plugins/io.github.chris.snitch
 ./build.sh
 ```
 
-**This repository does not contain Linux binaries.** The authoring host is macOS and cannot emit trustworthy musl/ELF images. First install builds `snitchd` from source with one command (`./build.sh`, typically seconds with a warm Cargo cache).
+**This repository does not contain Linux binaries.** The authoring host is macOS and cannot emit trustworthy musl/ELF images. First install builds `snitchd` and `snitch-block` from source with one command (`./build.sh`, typically seconds with a warm Cargo cache).
 
 After a git tag, GitHub Actions (`.github/workflows/release.yml`) publishes `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` binaries plus `SHA256SUMS-*`. You can download those release artifacts instead of compiling:
 
 ```sh
 # example once a v1.x tag exists
-curl -LO "https://github.com/<owner>/<repo>/releases/download/v1.0.0/snitchd-x86_64-unknown-linux-musl"
-install -m 0755 snitchd-x86_64-unknown-linux-musl bin/snitchd
+arch=x86_64-unknown-linux-musl
+ver=v1.0.0
+base="https://github.com/<owner>/<repo>/releases/download/${ver}"
+curl -LO "${base}/snitchd-${arch}"
+curl -LO "${base}/snitch-block-${arch}"
+curl -LO "${base}/SHA256SUMS-${arch}"
+sha256sum -c "SHA256SUMS-${arch}"
+mkdir -p bin
+install -m 0755 "snitchd-${arch}" bin/snitchd
+install -m 0755 "snitch-block-${arch}" bin/snitch-block
 ```
 
-`omarchy plugin add` copies files only — it never compiles or installs polkit policy. Monitoring works with zero privilege once `snitchd` is on `PATH` or `./bin/snitchd`.
+`omarchy plugin add` copies files only — it never compiles or installs polkit policy. Monitoring works with zero privilege once `snitchd` is on `PATH` or `./bin/snitchd`. It does **not** need nftables, conntrack, or cgroup v2.
+
+### Required packages (blocking only)
+
+Blocking additionally needs:
+
+| Need | Binary / check | Package (Arch) | Package (Debian/Ubuntu) |
+|------|----------------|----------------|-------------------------|
+| nftables | `nft` | `nftables` | `nftables` |
+| conntrack | `conntrack` | `conntrack-tools` | `conntrack-tools` |
+| cgroup v2 | `/sys/fs/cgroup/cgroup.controllers` | kernel unified hierarchy (systemd default) | same |
+
+```sh
+# Omarchy / Arch
+sudo pacman -S nftables conntrack-tools
+```
+
+`snitch-block status` reports `nft`, `conntrack`, `cgroupv2`, and `blockingReady`. If any are missing, the UI greys out block controls and shows the reason plus the package names. The map keeps running.
 
 Blocking needs the helper installed at the path the polkit policy authorizes:
 
@@ -89,7 +114,7 @@ on `table inet snitch` (`N` is the path-component count, 2 for the default layou
 
 If cgroup migration or the match fails, the UI offers **endpoints only — affects all apps** and will not silently substitute `block-ips`. Endpoint fallback records per-app ownership; **Unblock** calls `unblock-ips` so that app's addresses leave the set (shared addresses owned by another blocked app stay). `system` and `unknown` rows cannot be blocked.
 
-If no polkit authentication agent is present, or `/usr/lib/snitch/snitch-block` is missing, block controls are greyed.
+If no polkit authentication agent is present, `/usr/lib/snitch/snitch-block` is missing, or `nft` / `conntrack` / cgroup v2 is unavailable, block controls are greyed and the panel shows the reason. Monitoring still works.
 
 `snitch-block teardown` deletes `table inet snitch` and the plugin's cgroups and reports failure if either remains. Other firewall tables are never touched.
 
