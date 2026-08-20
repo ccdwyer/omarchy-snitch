@@ -41,6 +41,9 @@ pub struct Connection {
     pub new_network: bool,
     #[serde(default, rename = "networkKey")]
     pub network_key: String,
+    /// PTR name; only filled when reverse-DNS is opted in.
+    #[serde(default)]
+    pub hostname: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

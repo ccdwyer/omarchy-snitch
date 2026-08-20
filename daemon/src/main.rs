@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -171,6 +172,7 @@ fn run_self_test() -> Result<(), String> {
 struct Server {
     listener: UnixListener,
     clients: Vec<Client>,
+    rdns: bool,
 }
 
 struct Client {
@@ -178,7 +180,7 @@ struct Client {
 }
 
 impl Server {
-    fn bind(path: &Path) -> std::io::Result<Self> {
+    fn bind(path: &Path, rdns: bool) -> std::io::Result<Self> {
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
@@ -195,6 +197,7 @@ impl Server {
         Ok(Self {
             listener,
             clients: Vec::new(),
+            rdns,
         })
     }
 
@@ -208,7 +211,7 @@ impl Server {
                         version: VERSION.into(),
                         pid: std::process::id(),
                         coverage: COVERAGE.into(),
-                        rdns: false,
+                        rdns: self.rdns,
                     };
                     if write_line(&mut c.stream, &hello.to_line()).is_err() {
                         continue;
@@ -256,7 +259,7 @@ fn write_line(stream: &mut UnixStream, line: &str) -> std::io::Result<()> {
 }
 
 fn run_replay(path: &Path, args: &Args) -> Result<(), String> {
-    let mut server = Server::bind(&args.socket).map_err(|e| format!("bind {}: {e}", args.socket.display()))?;
+    let mut server = Server::bind(&args.socket, args.rdns).map_err(|e| format!("bind {}: {e}", args.socket.display()))?;
     eprintln!("snitchd: replay {} on {}", path.display(), args.socket.display());
     loop {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -307,11 +310,12 @@ struct Live {
     last_scan_cost: Duration,
     away_new: Vec<String>,
     last_flush: Instant,
+    rdns_cache: HashMap<std::net::IpAddr, String>,
 }
 
 fn run_live(args: &Args) -> Result<(), String> {
     let proc_ok = Path::new("/proc/net/tcp").is_file();
-    let mut server = Server::bind(&args.socket).map_err(|e| format!("bind {}: {e}", args.socket.display()))?;
+    let mut server = Server::bind(&args.socket, args.rdns).map_err(|e| format!("bind {}: {e}", args.socket.display()))?;
     let mut live = Live {
         geo: GeoDb::load(&args.data_dir, args.mmdb.as_deref()),
         seen: SeenSet::load(&args.state_dir),
@@ -323,6 +327,7 @@ fn run_live(args: &Args) -> Result<(), String> {
         last_scan_cost: Duration::from_millis(0),
         away_new: Vec::new(),
         last_flush: Instant::now(),
+        rdns_cache: HashMap::new(),
     };
     if !proc_ok {
         eprintln!("snitchd: /proc/net/tcp not found — emitting empty snapshots (use --replay on this host)");
@@ -396,7 +401,7 @@ impl Live {
     }
 }
 
-fn sample(live: &mut Live, server: &mut Server, _rdns: bool) {
+fn sample(live: &mut Live, server: &mut Server, rdns: bool) {
     let socks = read_all_sockets();
     let want_full = live.last_scan_cost < Duration::from_millis(30)
         || live.last_full_scan.elapsed() > Duration::from_secs(5);
@@ -479,6 +484,12 @@ fn sample(live: &mut Live, server: &mut Server, _rdns: bool) {
             }
         }
 
+        let hostname = if rdns && !unresolved && !remote_ip.is_loopback() && !snitchd::geo::is_private(remote_ip) {
+            reverse_dns(remote_ip, &mut live.rdns_cache)
+        } else {
+            String::new()
+        };
+
         let conn = Connection {
             id: id.clone(),
             proto: sock.proto.as_str().into(),
@@ -499,6 +510,7 @@ fn sample(live: &mut Live, server: &mut Server, _rdns: bool) {
             unresolved,
             new_network: new_net,
             network_key: net_key,
+            hostname,
         };
         live.live.insert(id, conn.clone());
         let ev = Event::Connect { ts: now, conn };
@@ -607,6 +619,34 @@ fn scan_inodes(only: Option<&HashSet<u64>>) -> HashMap<u64, u32> {
         }
     }
     map
+}
+
+fn reverse_dns(ip: std::net::IpAddr, cache: &mut HashMap<std::net::IpAddr, String>) -> String {
+    if let Some(h) = cache.get(&ip) {
+        return h.clone();
+    }
+    let name = reverse_dns_lookup(ip).unwrap_or_default();
+    cache.insert(ip, name.clone());
+    name
+}
+
+fn reverse_dns_lookup(ip: std::net::IpAddr) -> Option<String> {
+    let out = Command::new("getent")
+        .args(["hosts", &ip.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    let mut parts = line.split_whitespace();
+    parts.next()?;
+    let host = parts.next()?.trim().to_string();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
 }
 
 fn parse_socket_link(s: &str) -> Option<u64> {

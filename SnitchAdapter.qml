@@ -12,7 +12,14 @@ Item {
   function pluginDir(manifest) {
     if (manifest && manifest.__sourceDir)
       return String(manifest.__sourceDir).replace(/\/$/, "")
-    return ""
+    return localPluginDir()
+  }
+
+  function localPluginDir() {
+    var u = String(Qt.resolvedUrl("."))
+    if (u.indexOf("file://") === 0)
+      u = u.substring(7)
+    return u.replace(/\/$/, "")
   }
 
   function socketPath() {

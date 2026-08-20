@@ -12,9 +12,17 @@ cd ~/.config/omarchy/plugins/io.github.chris.snitch
 ./build.sh
 ```
 
-`./build.sh` is the first-install command: it builds `snitchd` (monitor) and `snitch-block` (privileged helper) from source. This tree does **not** ship Linux binaries. GitHub Actions (`.github/workflows/build.yml`) produces x86_64/aarch64 musl artifacts with SHA-256 checksums on tags; until a release exists, build locally.
+**This repository does not contain Linux binaries.** The authoring host is macOS and cannot emit trustworthy musl/ELF images. First install builds `snitchd` from source with one command (`./build.sh`, typically seconds with a warm Cargo cache).
 
-`omarchy plugin add` copies files only — it never compiles or installs polkit policy. Monitoring works with zero privilege once `snitchd` is built.
+After a git tag, GitHub Actions (`.github/workflows/release.yml`) publishes `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` binaries plus `SHA256SUMS-*`. You can download those release artifacts instead of compiling:
+
+```sh
+# example once a v1.x tag exists
+curl -LO "https://github.com/<owner>/<repo>/releases/download/v1.0.0/snitchd-x86_64-unknown-linux-musl"
+install -m 0755 snitchd-x86_64-unknown-linux-musl bin/snitchd
+```
+
+`omarchy plugin add` copies files only — it never compiles or installs polkit policy. Monitoring works with zero privilege once `snitchd` is on `PATH` or `./bin/snitchd`.
 
 Blocking needs the helper installed at the path the polkit policy authorizes:
 
@@ -50,13 +58,13 @@ Hover an arc: `firefox → 142.250.x.x, US, port 443`.
 | `/` | Search apps, IPs, countries |
 | Esc | Close search, confirm dialog, or panel |
 
-The plugin declares a `panel` kind. Open and close it through the documented shell IPC:
+The plugin declares a `panel` kind. `shell summon` opens a standalone surface centered on the bar (`KeyboardPanel` `centerOnBar`, `bar` from `shell.bar`). Clicking the pill still opens the nested bar-anchored panel. IPC:
 
 ```sh
 omarchy-shell shell summon io.github.chris.snitch '{}'
 omarchy-shell shell hide io.github.chris.snitch
 omarchy-shell shell toggle io.github.chris.snitch '{}'
-omarchy-shell shell call io.github.chris.snitch ping
+omarchy-shell shell call io.github.chris.snitch ping '{}'
 ```
 
 Service status (always-loaded singleton):
@@ -89,7 +97,7 @@ If no polkit authentication agent is present, or `/usr/lib/snitch/snitch-block` 
 - TIME_WAIT and LISTEN sockets are parsed then dropped; they are not conversations.
 - Other-uid processes appear as **system** (no desktop identity without privilege) and cannot be blocked.
 - UDP remotes via conntrack are a documented v1.1 path, not a 1.0 claim.
-- Linux prebuilts are not in git. First install is `./build.sh`. CI builds musl binaries for tagged releases.
+- Linux prebuilts are **not** committed. First install is `./build.sh`. Tagged GitHub Releases from CI carry musl binaries and checksums.
 - City-level geo is out of scope. Centroids are country-level.
 
 ## Replay / fallback

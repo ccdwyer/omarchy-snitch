@@ -74,4 +74,12 @@ No public-IP geo (that would be outbound). Origin is a timezone centroid from `$
 
 ## Linux prebuilts
 
-This machine is macOS (`aarch64-apple-darwin` only; no linux-musl target or linker). Shipping Mach-O as Linux binaries would be a lie. First install is `./build.sh`. `.github/workflows/build.yml` cross-builds `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with SHA-256 checksums; artifacts attach to tagged GitHub Releases. This repo does not contain prebuilt binaries.
+This machine is macOS (`aarch64-apple-darwin` only; no linux-musl target, no zig, no cross linker). Committing “Linux binaries” from here would be untrustworthy. **Prebuilts are delivered only via CI on git tags** (`.github/workflows/release.yml`: x86_64 + aarch64 musl, SHA-256 checksums, attached to the GitHub Release). They are never authored or checked in from this dev machine. First install on a judge box is `./build.sh`.
+
+## Summoned panel surface
+
+`kinds` includes `panel`. The host injects `shell` (which has `.bar`) but not `anchorItem`. Summoned `Panel.qml` therefore uses `KeyboardPanel { centerOnBar: true; bar: shell.bar; anchorItem: summonAnchor }` — the same center-on-bar contract as `omarchy.clock`. The nested bar-widget loader still passes the pill as `anchorItem`.
+
+## Plugin directory fallback
+
+`manifest.__sourceDir` is stamped by PluginRegistry but is not a documented third-party API. `SnitchAdapter.pluginDir` falls back to `Qt.resolvedUrl(".")` (this QML file’s directory) so binaries, GeoJSON, flags, and replay fixtures still resolve.

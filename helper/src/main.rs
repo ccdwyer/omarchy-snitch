@@ -4,8 +4,11 @@
 //! Verbs: block-app, unblock-app, block-ips, unblock-ips, teardown, status.
 
 use serde_json::{json, Value};
+use snitch_block::forest::{self, ProcIdentity};
 use snitch_block::ids::sanitize_app;
 use snitch_block::owners::{self, OwnerMap};
+use snitch_block::restore::{self, RestoreFile};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
@@ -92,7 +95,7 @@ fn owners_path() -> PathBuf {
 
 fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     let app = sanitize_app(app_raw)?;
-    let pids: Vec<u32> = pids
+    let seeds: Vec<u32> = pids
         .iter()
         .map(|s| parse_pid(s))
         .collect::<Result<Vec<u32>, String>>()?
@@ -102,6 +105,25 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     if !Path::new(CGROUP_ROOT).join("cgroup.controllers").is_file() {
         return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
     }
+    let procs = snapshot_proc();
+    let forest = forest::collect_forest(&seeds, &procs);
+    if forest.is_empty() {
+        return Err("no validated processes in the application forest".into());
+    }
+
+    let mut restore_file = RestoreFile::default();
+    for pid in &forest {
+        if let Some(p) = procs.get(pid) {
+            let orig = if restore::is_root_cgroup(&p.cgroup) {
+                restore::fallback_user_slice(p.uid)
+            } else {
+                p.cgroup.clone()
+            };
+            restore_file.pids.insert(pid.to_string(), orig);
+        }
+    }
+    restore::save(&restore::path_for(&app), &restore_file)?;
+
     ensure_table_and_output_chain()?;
     let slice = cgroup_slice();
     fs::create_dir_all(&slice).map_err(|e| format!("mkdir slice: {e}"))?;
@@ -110,25 +132,36 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
     fs::create_dir_all(&dest).map_err(|e| format!("mkdir app cgroup: {e}"))?;
 
     let mut moved = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for pid in pids {
-        migrate_tree(pid, &dest, &mut seen, &mut moved);
+    for pid in &forest {
+        if write_proc(&dest, *pid).is_ok() {
+            moved.push(*pid);
+        }
     }
     if moved.is_empty() {
+        let _ = restore_memberships(&app);
         return Err("no processes migrated; cannot install a truthful cgroup block".into());
     }
 
     let path = cgroup_match_path(&app);
-    add_cgroup_drop_rule(&path)?;
+    if let Err(e) = add_cgroup_drop_rule(&path) {
+        let _ = restore_memberships(&app);
+        return Err(e);
+    }
     if !verify_cgroup_rule(&path) {
+        let _ = delete_rules_containing(&path);
+        let _ = restore_memberships(&app);
         return Err("nft rule did not land (nft list check failed)".into());
     }
 
     let remotes = collect_remotes(&moved);
     let flush = flush_conntrack(&remotes)?;
-    let nft_ok = verify_cgroup_rule(&path);
-    if !nft_ok {
-        return Err("nft rule did not land (nft list check failed)".into());
+    if !flush.ok {
+        let _ = delete_rules_containing(&path);
+        let _ = restore_memberships(&app);
+        return Err(format!(
+            "conntrack flush failed — nft rule rolled back ({})",
+            flush.summary()
+        ));
     }
 
     Ok(json!({
@@ -136,24 +169,100 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
         "mechanism": "cgroup",
         "path": path,
         "moved": moved,
+        "forest": forest,
         "flushed": flush.flushed,
         "flushFailed": flush.failed,
-        "verified": flush.ok,
-        "warning": if flush.ok { Value::Null } else { json!(flush.summary()) },
+        "verified": true,
         "helper": CANONICAL_HELPER
     }))
 }
 
-fn migrate_tree(pid: u32, dest: &Path, seen: &mut std::collections::HashSet<u32>, moved: &mut Vec<u32>) {
-    if pid < 2 || !seen.insert(pid) {
-        return;
+fn snapshot_proc() -> HashMap<u32, ProcIdentity> {
+    let mut map = HashMap::new();
+    let Ok(rd) = fs::read_dir("/proc") else {
+        return map;
+    };
+    for e in rd.flatten() {
+        let pid: u32 = match e.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(p) if p >= 2 => p,
+            _ => continue,
+        };
+        if let Some(id) = read_identity(pid) {
+            map.insert(pid, id);
+        }
     }
-    if write_proc(dest, pid).is_ok() {
-        moved.push(pid);
+    map
+}
+
+fn read_identity(pid: u32) -> Option<ProcIdentity> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let mut ppid = 0u32;
+    let mut uid = 0u32;
+    for line in status.lines() {
+        if let Some(r) = line.strip_prefix("PPid:") {
+            ppid = r.split_whitespace().next()?.parse().ok()?;
+        }
+        if let Some(r) = line.strip_prefix("Uid:") {
+            uid = r.split_whitespace().next()?.parse().ok()?;
+        }
     }
-    for child in children_of(pid) {
-        migrate_tree(child, dest, seen, moved);
+    let exe_base = fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .ok()
+        .and_then(|t| restore::parse_unified_cgroup(&t))
+        .unwrap_or_default();
+    Some(ProcIdentity {
+        pid,
+        ppid,
+        uid,
+        exe_base,
+        comm,
+        cgroup,
+    })
+}
+
+fn restore_memberships(app: &str) -> Result<Vec<u32>, String> {
+    let file = restore::load(&restore::path_for(app));
+    let mut restored = Vec::new();
+    let mut errors = Vec::new();
+    for (pid_s, orig) in &file.pids {
+        let pid: u32 = match pid_s.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        if restore::is_root_cgroup(orig) {
+            errors.push(format!("{pid}: refusing to write cgroup root"));
+            continue;
+        }
+        let dest = restore::sys_path(Path::new(CGROUP_ROOT), orig);
+        if write_proc(&dest, pid).is_err() {
+            errors.push(format!("{pid}: restore to {} failed", dest.display()));
+            continue;
+        }
+        let current = fs::read_to_string(format!("/proc/{pid}/cgroup"))
+            .ok()
+            .and_then(|t| restore::parse_unified_cgroup(&t))
+            .unwrap_or_default();
+        if !restore::membership_matches(&current, orig) {
+            errors.push(format!("{pid}: still in {current}, wanted {orig}"));
+            continue;
+        }
+        restored.push(pid);
     }
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(restored)
 }
 
 fn write_proc(dest: &Path, pid: u32) -> Result<(), String> {
@@ -162,25 +271,6 @@ fn write_proc(dest: &Path, pid: u32) -> Result<(), String> {
         .open(dest.join("cgroup.procs"))
         .map_err(|e| format!("open cgroup.procs: {e}"))?;
     write!(f, "{pid}").map_err(|e| format!("migrate {pid}: {e}"))
-}
-
-fn children_of(pid: u32) -> Vec<u32> {
-    let mut kids = Vec::new();
-    let task = format!("/proc/{pid}/task");
-    let Ok(tasks) = fs::read_dir(&task) else {
-        return kids;
-    };
-    for t in tasks.flatten() {
-        let p = t.path().join("children");
-        if let Ok(text) = fs::read_to_string(p) {
-            for tok in text.split_whitespace() {
-                if let Ok(c) = tok.parse::<u32>() {
-                    kids.push(c);
-                }
-            }
-        }
-    }
-    kids
 }
 
 fn collect_remotes(pids: &[u32]) -> Vec<IpAddr> {
@@ -401,21 +491,17 @@ fn unblock_app(app_raw: &str) -> Result<Value, String> {
     if verify_cgroup_rule(&path) {
         return Err("cgroup drop rule still present after delete".into());
     }
+    let restored = restore_memberships(&app)?;
     let dest = cgroup_app(&app);
-    if let Ok(text) = fs::read_to_string(dest.join("cgroup.procs")) {
-        for tok in text.split_whitespace() {
-            if let Ok(pid) = tok.parse::<u32>() {
-                let _ = fs::write(Path::new(CGROUP_ROOT).join("cgroup.procs"), pid.to_string());
-            }
-        }
-    }
     if dest.exists() {
         fs::remove_dir(&dest).map_err(|e| format!("rmdir {}: {e}", dest.display()))?;
     }
+    let _ = fs::remove_file(restore::path_for(&app));
     Ok(json!({
         "ok": true,
         "mechanism": "cgroup",
         "path": path,
+        "restored": restored,
         "verified": true
     }))
 }
@@ -508,19 +594,37 @@ fn block_ips(app_raw: &str, ips: &[String]) -> Result<Value, String> {
         parsed.push(s.parse::<IpAddr>().map_err(|_| format!("bad ip {s}"))?);
     }
     ensure_ip_sets_and_rules()?;
-    let mut added = Vec::new();
+    let mut added: Vec<String> = Vec::new();
     for ip in &parsed {
         add_element(ip)?;
         if !verify_element_present(ip) {
+            for prev in &added {
+                if let Ok(prev_ip) = prev.parse::<IpAddr>() {
+                    let _ = delete_element(&prev_ip);
+                }
+            }
+            let _ = delete_element(ip);
             return Err(format!("{ip} not present in nft set after add"));
         }
         added.push(ip.to_string());
     }
+
+    let flush = flush_conntrack(&parsed)?;
+    if !flush.ok {
+        for ip_s in &added {
+            if let Ok(ip) = ip_s.parse::<IpAddr>() {
+                let _ = delete_element(&ip);
+            }
+        }
+        return Err(format!(
+            "conntrack flush failed — nft elements rolled back ({})",
+            flush.summary()
+        ));
+    }
+
     let mut map = owners::load(&owners_path());
     owners::grant(&mut map, &app, &added);
     owners::save(&owners_path(), &map)?;
-
-    let flush = flush_conntrack(&parsed)?;
     Ok(json!({
         "ok": true,
         "mechanism": "endpoints",
@@ -529,12 +633,8 @@ fn block_ips(app_raw: &str, ips: &[String]) -> Result<Value, String> {
         "ips": added,
         "flushed": flush.flushed,
         "flushFailed": flush.failed,
-        "verified": flush.ok,
-        "warning": if flush.ok {
-            json!("endpoints only — affects all apps")
-        } else {
-            json!(format!("endpoints only — affects all apps; conntrack: {}", flush.summary()))
-        }
+        "verified": true,
+        "warning": "endpoints only — affects all apps"
     }))
 }
 
@@ -602,18 +702,33 @@ fn teardown() -> Result<Value, String> {
         errors.push("table inet snitch still present after delete".into());
     }
 
+    let restore_dir = Path::new("/var/lib/snitch/cgroup-restore");
+    if restore_dir.is_dir() {
+        if let Ok(rd) = fs::read_dir(restore_dir) {
+            for e in rd.flatten() {
+                let stem = e
+                    .path()
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if stem.is_empty() {
+                    continue;
+                }
+                match restore_memberships(&stem) {
+                    Ok(_) => {
+                        let _ = fs::remove_file(e.path());
+                    }
+                    Err(err) => errors.push(format!("restore {stem}: {err}")),
+                }
+            }
+        }
+    }
+
     let slice = cgroup_slice();
     if slice.is_dir() {
         if let Ok(rd) = fs::read_dir(&slice) {
             for e in rd.flatten() {
                 let p = e.path();
-                if let Ok(text) = fs::read_to_string(p.join("cgroup.procs")) {
-                    for tok in text.split_whitespace() {
-                        if let Ok(pid) = tok.parse::<u32>() {
-                            let _ = fs::write(Path::new(CGROUP_ROOT).join("cgroup.procs"), pid.to_string());
-                        }
-                    }
-                }
                 if let Err(e) = fs::remove_dir(&p) {
                     errors.push(format!("rmdir {}: {e}", p.display()));
                 }

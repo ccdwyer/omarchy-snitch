@@ -34,5 +34,5 @@ if [[ -n "$SUM" && -f "$SUM" ]]; then
 fi
 
 echo
-echo "optional: sudo ./scripts/install-privileged.sh"
-echo "  installs snitch-block + polkit policy (one auth_admin_keep prompt)"
+echo "optional: ./scripts/install-privileged.sh"
+echo "  pkexec installs snitch-block + polkit policy (one auth_admin_keep prompt)"

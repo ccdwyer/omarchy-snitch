@@ -193,8 +193,8 @@ Item {
       lastBlockError = raw || "helper produced no JSON"
       return
     }
-    if (ev.ok) {
-      lastBlockError = (ev.verified === false && ev.warning) ? String(ev.warning) : ""
+    if (ev.ok && ev.verified !== false) {
+      lastBlockError = ev.warning ? String(ev.warning) : ""
       if (ev.teardown) {
         model.blocked = {}
         ConnectionModel.rebuild(model, Date.now())
@@ -215,7 +215,7 @@ Item {
       }
       syncFromModel()
     } else {
-      lastBlockError = ev.error || "block failed"
+      lastBlockError = ev.error || (ev.warning ? String(ev.warning) : "") || "block incomplete"
       var failedVerb = blockProc.command && blockProc.command.length >= 3 ? blockProc.command[2] : ""
       if (failedVerb === "block-app" && blockProc.command.length >= 4)
         offerIpsFallback(blockProc.command[3], ev.error)

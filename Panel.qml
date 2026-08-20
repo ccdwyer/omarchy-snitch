@@ -149,11 +149,21 @@ Panel {
       selectedIndex = Math.max(0, apps.length - 1)
   }
 
+  // Summoned panels have no bar button. KeyboardPanel's documented
+  // centerOnBar path (clock) positions against shell.bar from the host.
+  Item {
+    id: summonAnchor
+    width: 1
+    height: 1
+    visible: false
+  }
+
   KeyboardPanel {
     id: panel
-    anchorItem: root.anchorItem
+    anchorItem: root.anchorItem ? root.anchorItem : summonAnchor
     owner: root.barIdentity
     bar: root.liveBar
+    centerOnBar: !root.anchorItem
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(560))
