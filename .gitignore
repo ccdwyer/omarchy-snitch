@@ -11,3 +11,5 @@
 .gpt_review*.md
 .review_prompt*.md
 .serena/
+__pycache__/
+*.pyc
