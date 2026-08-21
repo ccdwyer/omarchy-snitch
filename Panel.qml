@@ -443,6 +443,7 @@ Panel {
           width: parent.width
           visible: root.hoverLabel !== ""
           text: root.hoverLabel
+          textFormat: Text.PlainText
           color: root.fg
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -561,6 +562,7 @@ Panel {
                 height: Style.space(20)
                 visible: parent.children[0].status !== Image.Ready
                 text: (modelData.name || "?").charAt(0).toUpperCase()
+                textFormat: Text.PlainText
                 color: root.fg
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -577,6 +579,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: modelData.name || modelData.id
+                  textFormat: Text.PlainText
                   color: root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -597,6 +600,7 @@ Panel {
                   }
                   Text {
                     text: connSummary(modelData)
+                    textFormat: Text.PlainText
                     color: Qt.darker(root.fg, 1.5)
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
