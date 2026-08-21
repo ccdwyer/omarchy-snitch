@@ -171,7 +171,14 @@ fn block_app(app_raw: &str, pids: &[String]) -> Result<Value, String> {
                 true,
             );
         }
-        restore_file.pids.insert(pid.to_string(), p.cgroup.clone());
+        restore_file.pids.insert(
+            pid.to_string(),
+            restore::RestorePid {
+                cgroup: p.cgroup.clone(),
+                uid: p.uid,
+                starttime: p.starttime,
+            },
+        );
     }
     restore::save(&restore::path_for(&app), &restore_file)?;
 
@@ -354,12 +361,20 @@ fn restore_memberships(app: &str) -> Result<Vec<u32>, String> {
     let file = restore::load(&restore::path_for(app));
     let mut restored = Vec::new();
     let mut errors = Vec::new();
-    for (pid_s, orig) in &file.pids {
+    for (pid_s, rec) in &file.pids {
         let pid: u32 = match pid_s.parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
+        let orig = &rec.cgroup;
         if !Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        let Some(now) = read_identity(pid) else {
+            continue;
+        };
+        if now.uid != rec.uid || now.starttime != rec.starttime {
+            errors.push(format!("{pid}: uid/starttime mismatch — refusing restore (PID reuse)"));
             continue;
         }
         if restore::is_root_cgroup(orig) {
@@ -677,17 +692,19 @@ fn unblock_app(app_raw: &str) -> Result<Value, String> {
 }
 
 fn delete_rules_containing(needle: &str) -> Result<(), String> {
+    let level = restore::cgroup_match_level(needle);
     let out = Command::new("nft")
         .args(["-a", "list", "chain", "inet", TABLE, "out"])
         .output()
         .map_err(|e| format!("nft list: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout);
     for line in text.lines() {
-        if line.contains(needle) {
-            if let Some(handle) = line.rsplit("handle").nth(0).map(str::trim) {
-                if handle.chars().all(|c| c.is_ascii_digit()) {
-                    nft(&["delete", "rule", "inet", TABLE, "out", "handle", handle])?;
-                }
+        if !nft_verify::cgroup_drop_in_text(line, needle, level) {
+            continue;
+        }
+        if let Some(handle) = line.rsplit("handle").nth(0).map(str::trim) {
+            if handle.chars().all(|c| c.is_ascii_digit()) {
+                nft(&["delete", "rule", "inet", TABLE, "out", "handle", handle])?;
             }
         }
     }

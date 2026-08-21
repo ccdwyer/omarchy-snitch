@@ -35,7 +35,7 @@ fn line_is_cgroup_drop(line: &str, path: &str, level: u32) -> bool {
 }
 
 fn line_has_path(line: &str, path: &str) -> bool {
-    line.contains(&format!("\"{path}\"")) || line.split_whitespace().any(|t| t == path)
+    line.split_whitespace().any(|t| t.trim_matches('"') == path)
 }
 
 fn find_matching_rule(v: &Value, path: &str, level: u32) -> bool {
@@ -191,6 +191,13 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn text_prefix_path_is_not_a_match() {
+        let line = r#"socket cgroupv2 level 2 "snitch.slice/snitch-firefox2" drop # handle 12"#;
+        assert!(!cgroup_drop_in_text(line, "snitch.slice/snitch-firefox", 2));
+        assert!(cgroup_drop_in_text(line, "snitch.slice/snitch-firefox2", 2));
+    }
+
     fn json_path_on_one_rule_drop_on_another_rejected() {
         let js = format!(
             r#"{{"nftables":[

@@ -2,10 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestorePid {
+    pub cgroup: String,
+    pub uid: u32,
+    pub starttime: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RestoreFile {
     #[serde(default)]
-    pub pids: BTreeMap<String, String>,
+    pub pids: BTreeMap<String, RestorePid>,
 }
 
 pub fn parse_unified_cgroup(text: &str) -> Option<String> {
@@ -34,6 +41,8 @@ pub fn path_for(app: &str) -> PathBuf {
 
 pub fn load(path: &Path) -> RestoreFile {
     let text = std::fs::read_to_string(path).unwrap_or_default();
+    // Old files stored bare cgroup strings. Fail closed instead of restoring
+    // a PID without uid/starttime.
     serde_json::from_str(&text).unwrap_or_default()
 }
 
